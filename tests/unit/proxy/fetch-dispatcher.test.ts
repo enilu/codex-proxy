@@ -41,10 +41,22 @@ describe("fetch dispatcher", () => {
     expect(mockProxyAgent).toHaveBeenCalledWith("http://127.0.0.1:7890");
   });
 
-  it("falls back to HTTPS_PROXY before config is loaded", async () => {
+  it("goes direct when config is not loaded (no env var fallback)", async () => {
     mockGetConfig.mockImplementation(() => {
       throw new Error("Config not loaded");
     });
+    process.env.HTTPS_PROXY = "http://127.0.0.1:7891";
+    const { withFetchDispatcher } = await import("@src/proxy/fetch-dispatcher.js");
+
+    const init = { method: "POST" };
+    const result = withFetchDispatcher(init);
+
+    expect(result).toBe(init);
+    expect(mockProxyAgent).not.toHaveBeenCalled();
+  });
+
+  it("reads HTTPS_PROXY when proxy_enabled is true and no proxy_url set", async () => {
+    mockGetConfig.mockReturnValue({ tls: { proxy_url: null, proxy_enabled: true } });
     process.env.HTTPS_PROXY = "http://127.0.0.1:7891";
     const { withFetchDispatcher } = await import("@src/proxy/fetch-dispatcher.js");
 

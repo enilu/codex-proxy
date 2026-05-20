@@ -3,6 +3,7 @@ import { extractErrorMessage } from "../utils/extract-error";
 
 export interface GeneralSettingsData {
   port: number;
+  proxy_enabled: boolean;
   proxy_url: string | null;
   force_http11: boolean;
   inject_desktop_context: boolean;
@@ -70,6 +71,7 @@ export function useGeneralSettings(apiKey: string | null) {
       const result = await resp.json() as GeneralSettingsSaveResponse;
       setData({
         port: result.port,
+        proxy_enabled: result.proxy_enabled,
         proxy_url: result.proxy_url,
         force_http11: result.force_http11,
         inject_desktop_context: result.inject_desktop_context,

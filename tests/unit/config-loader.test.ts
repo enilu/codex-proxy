@@ -385,6 +385,13 @@ describe("applyEnvOverrides", () => {
     expect((raw.tls as Record<string, unknown>).proxy_url).toBe("http://proxy.example.com:8080");
   });
 
+  it("skips HTTPS_PROXY when proxy_enabled is false", () => {
+    process.env.HTTPS_PROXY = "http://proxy.example.com:8080";
+    const raw = { auth: {}, server: {}, tls: { proxy_enabled: false } } as Record<string, unknown>;
+    applyEnvOverrides(raw, null);
+    expect((raw.tls as Record<string, unknown>).proxy_url).toBeUndefined();
+  });
+
   it("skips HTTPS_PROXY when local.yaml has proxy_url set", () => {
     process.env.HTTPS_PROXY = "http://env-proxy:8080";
     const raw = { auth: {}, server: {}, tls: { proxy_url: "http://local-proxy:8080" } } as Record<string, unknown>;

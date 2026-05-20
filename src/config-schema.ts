@@ -132,6 +132,7 @@ export const ConfigSchema = z.object({
     cleanup_interval_minutes: z.number().min(1).default(5),
   }),
   tls: z.object({
+    proxy_enabled: z.boolean().default(false),
     proxy_url: z.string().nullable().default(null),
     force_http11: z.boolean().default(false),
   }).default({}),

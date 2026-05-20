@@ -80,6 +80,11 @@ export async function initProxy(): Promise<void> {
     console.log(`[Proxy] Using configured proxy: ${_proxyUrl}`);
     return;
   }
+  if (!config.tls.proxy_enabled) {
+    _proxyUrl = null;
+    console.log("[Proxy] proxy_enabled is false — direct connection");
+    return;
+  }
   _proxyUrl = await detectLocalProxy();
   if (!_proxyUrl) {
     console.log("[Proxy] No local proxy detected — direct connection");

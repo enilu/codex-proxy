@@ -133,6 +133,7 @@ export function createSettingsRoutes(): Hono {
     const config = getConfig();
     return c.json({
       port: config.server.port,
+      proxy_enabled: config.tls.proxy_enabled,
       proxy_url: config.tls.proxy_url,
       force_http11: config.tls.force_http11,
       inject_desktop_context: config.model.inject_desktop_context,
@@ -171,6 +172,7 @@ export function createSettingsRoutes(): Hono {
 
     const body = await c.req.json() as {
       port?: number;
+      proxy_enabled?: boolean;
       proxy_url?: string | null;
       force_http11?: boolean;
       inject_desktop_context?: boolean;
@@ -285,6 +287,10 @@ export function createSettingsRoutes(): Hono {
         if (!data.tls) data.tls = {};
         (data.tls as Record<string, unknown>).proxy_url = body.proxy_url;
       }
+      if (body.proxy_enabled !== undefined) {
+        if (!data.tls) data.tls = {};
+        (data.tls as Record<string, unknown>).proxy_enabled = body.proxy_enabled;
+      }
       if (body.force_http11 !== undefined) {
         if (!data.tls) data.tls = {};
         (data.tls as Record<string, unknown>).force_http11 = body.force_http11;
@@ -378,6 +384,7 @@ export function createSettingsRoutes(): Hono {
     return c.json({
       success: true,
       port: updated.server.port,
+      proxy_enabled: updated.tls.proxy_enabled,
       proxy_url: updated.tls.proxy_url,
       force_http11: updated.tls.force_http11,
       inject_desktop_context: updated.model.inject_desktop_context,

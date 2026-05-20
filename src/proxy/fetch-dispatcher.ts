@@ -7,9 +7,14 @@ let cachedDispatcher: Dispatcher | undefined;
 export function getFetchDispatcher(): Dispatcher | undefined {
   let proxyUrl: string | null = null;
   try {
-    proxyUrl = getConfig().tls.proxy_url;
+    const config = getConfig();
+    proxyUrl = config.tls.proxy_url;
+    if (!proxyUrl && config.tls.proxy_enabled) {
+      proxyUrl = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? null;
+    }
   } catch {
-    proxyUrl = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? null;
+    // config not loaded — skip env var fallback, go direct
+    proxyUrl = null;
   }
 
   if (!proxyUrl) return undefined;

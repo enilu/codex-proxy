@@ -9,6 +9,7 @@ export function GeneralSettings() {
   const gs = useGeneralSettings(settings.apiKey);
 
   const [draftPort, setDraftPort] = useState<string | null>(null);
+  const [draftProxyEnabled, setDraftProxyEnabled] = useState<boolean | null>(null);
   const [draftProxyUrl, setDraftProxyUrl] = useState<string | null>(null);
   const [draftForceHttp11, setDraftForceHttp11] = useState<boolean | null>(null);
   const [draftInjectContext, setDraftInjectContext] = useState<boolean | null>(null);
@@ -27,6 +28,7 @@ export function GeneralSettings() {
   const [collapsed, setCollapsed] = useState(true);
 
   const currentPort = gs.data?.port ?? 8080;
+  const currentProxyEnabled = gs.data?.proxy_enabled ?? false;
   const currentProxyUrl = gs.data?.proxy_url ?? "";
   const currentForceHttp11 = gs.data?.force_http11 ?? false;
   const currentInjectContext = gs.data?.inject_desktop_context ?? false;
@@ -44,6 +46,7 @@ export function GeneralSettings() {
   const currentShowUpdateDialog = gs.data?.show_update_dialog ?? false;
 
   const displayPort = draftPort ?? String(currentPort);
+  const displayProxyEnabled = draftProxyEnabled ?? currentProxyEnabled;
   const displayProxyUrl = draftProxyUrl ?? currentProxyUrl;
   const displayForceHttp11 = draftForceHttp11 ?? currentForceHttp11;
   const displayInjectContext = draftInjectContext ?? currentInjectContext;
@@ -62,6 +65,7 @@ export function GeneralSettings() {
 
   const isDirty =
     draftPort !== null ||
+    draftProxyEnabled !== null ||
     draftProxyUrl !== null ||
     draftForceHttp11 !== null ||
     draftInjectContext !== null ||
@@ -85,6 +89,10 @@ export function GeneralSettings() {
       const val = parseInt(draftPort, 10);
       if (isNaN(val) || val < 1 || val > 65535) return;
       patch.port = val;
+    }
+
+    if (draftProxyEnabled !== null) {
+      patch.proxy_enabled = draftProxyEnabled;
     }
 
     if (draftProxyUrl !== null) {
@@ -164,6 +172,7 @@ export function GeneralSettings() {
 
     await gs.save(patch);
     setDraftPort(null);
+    setDraftProxyEnabled(null);
     setDraftProxyUrl(null);
     setDraftForceHttp11(null);
     setDraftInjectContext(null);
@@ -179,7 +188,7 @@ export function GeneralSettings() {
     setDraftAutoUpdate(null);
     setDraftAutoDownload(null);
     setDraftShowUpdateDialog(null);
-  }, [draftPort, draftProxyUrl, draftForceHttp11, draftInjectContext, draftSuppressDirectives, draftDefaultModel, draftReasoningEffort, draftRefreshEnabled, draftRefreshMargin, draftRefreshConcurrency, draftMaxConcurrent, draftRequestInterval, draftUsageHistoryRetention, draftAutoUpdate, draftAutoDownload, draftShowUpdateDialog, gs]);
+  }, [draftPort, draftProxyEnabled, draftProxyUrl, draftForceHttp11, draftInjectContext, draftSuppressDirectives, draftDefaultModel, draftReasoningEffort, draftRefreshEnabled, draftRefreshMargin, draftRefreshConcurrency, draftMaxConcurrent, draftRequestInterval, draftUsageHistoryRetention, draftAutoUpdate, draftAutoDownload, draftShowUpdateDialog, gs]);
 
   const inputCls =
     "w-full px-3 py-2 bg-white dark:bg-bg-dark border border-gray-200 dark:border-border-dark rounded-lg text-[0.78rem] font-mono text-slate-700 dark:text-text-main outline-none focus:ring-1 focus:ring-primary";
@@ -316,6 +325,21 @@ export function GeneralSettings() {
           </div>
 
           {/* Upstream Proxy */}
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="proxy-enabled"
+                checked={displayProxyEnabled}
+                onChange={(e) => setDraftProxyEnabled((e.target as HTMLInputElement).checked)}
+                class="w-4 h-4 rounded border-gray-300 dark:border-border-dark text-primary focus:ring-primary cursor-pointer"
+              />
+              <label for="proxy-enabled" class="text-xs font-semibold text-slate-700 dark:text-text-main cursor-pointer">
+                {t("generalSettingsProxyEnabled")}
+              </label>
+            </div>
+            <p class="text-xs text-slate-400 dark:text-text-dim ml-6">{t("generalSettingsProxyEnabledHint")}</p>
+          </div>
           <div class="space-y-1.5">
             <label class="text-xs font-semibold text-slate-700 dark:text-text-main">
               {t("generalSettingsProxyUrl")}

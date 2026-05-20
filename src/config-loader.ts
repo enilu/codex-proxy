@@ -220,10 +220,11 @@ export function applyEnvOverrides(
       ollama.disable_vision = ["1", "true", "yes"].includes(ollamaDisableVisionEnv);
     }
   }
-  // Only apply HTTPS_PROXY env if user hasn't explicitly set proxy_url in local.yaml
+  // Only apply HTTPS_PROXY env if proxy_enabled and user hasn't explicitly set proxy_url in local.yaml
   const localTls = localOverrides?.tls as Record<string, unknown> | undefined;
   const localHasProxyUrl = localTls !== undefined && "proxy_url" in localTls;
-  if (!localHasProxyUrl) {
+  const proxyEnabled = (raw.tls as Record<string, unknown> | undefined)?.proxy_enabled !== false;
+  if (proxyEnabled && !localHasProxyUrl) {
     const proxyEnv = process.env.HTTPS_PROXY || process.env.https_proxy;
     if (proxyEnv) {
       if (!raw.tls) raw.tls = {};
