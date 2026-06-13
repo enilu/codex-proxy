@@ -35,16 +35,18 @@ import { initTransport, getTransport } from "./tls/transport.js";
 import { loadStaticModels } from "./models/model-store.js";
 import { startModelRefresh, stopModelRefresh } from "./models/model-fetcher.js";
 import { startQuotaRefresh, stopQuotaRefresh } from "./auth/usage-refresher.js";
+import { ActiveQuotaRefresher } from "./auth/active-quota-refresher.js";
 import { UsageStatsStore } from "./auth/usage-stats.js";
 import { startSessionCleanup, stopSessionCleanup } from "./auth/dashboard-session.js";
 import { createDashboardAuthRoutes } from "./routes/dashboard-login.js";
-import { UpstreamRouter } from "./proxy/upstream-router.js";
 import { OpenAIUpstream } from "./proxy/openai-upstream.js";
 import { AnthropicUpstream } from "./proxy/anthropic-upstream.js";
 import { GeminiUpstream } from "./proxy/gemini-upstream.js";
 import { ApiKeyPool } from "./auth/api-key-pool.js";
 import { createApiKeyRoutes } from "./routes/api-keys.js";
-import { createAdapterForEntry } from "./proxy/adapter-factory.js";
+import { ApiKeyModelCache } from "./auth/api-key-model-cache.js";
+import { createEmbeddingsRoutes } from "./routes/embeddings.js";
+import { createRuntimeUpstreamRouter } from "./proxy/upstream-router-bootstrap.js";
 import { startOllamaBridge, stopOllamaBridge } from "./ollama/server.js";
 import { createOfficialAgentRoutes } from "./routes/official-agent.js";
 import { installUncaughtErrorHandlers } from "./logs/error-log.js";
@@ -117,7 +119,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.use("*", cors);
   app.use("*", requestId);
   app.use("*", logger);
-  app.use("*", errorHandler);
+  app.onError(errorHandler);
   app.use("*", dashboardAuth);
   app.use("*", logCapture);
 
@@ -141,11 +143,11 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
     console.log("[Init] OpenAI upstream configured");
   }
   if (cfg.providers.anthropic) {
-    adapters.set("anthropic", new AnthropicUpstream(cfg.providers.anthropic.api_key));
+    adapters.set("anthropic", new AnthropicUpstream(cfg.providers.anthropic.api_key, cfg.providers.anthropic.base_url));
     console.log("[Init] Anthropic upstream configured");
   }
   if (cfg.providers.gemini) {
-    adapters.set("gemini", new GeminiUpstream(cfg.providers.gemini.api_key));
+    adapters.set("gemini", new GeminiUpstream(cfg.providers.gemini.api_key, cfg.providers.gemini.base_url));
     console.log("[Init] Gemini upstream configured");
   }
   for (const [name, provider] of Object.entries(cfg.providers.custom)) {
@@ -160,16 +162,11 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   // Initialize API key pool for runtime-managed third-party keys
   const apiKeyPool = new ApiKeyPool();
   const hasApiKeys = apiKeyPool.getAll().length > 0;
+  const upstreamRouter = createRuntimeUpstreamRouter(adapters, cfg.model_routing, apiKeyPool);
+  if (hasApiKeys) console.log(`[Init] API key pool: ${apiKeyPool.getAll().length} key(s) loaded`);
 
-  const upstreamRouter = (adapters.size > 0 || hasApiKeys)
-    ? new UpstreamRouter(adapters, cfg.model_routing, "codex")
-    : undefined;
-
-  // Attach API key pool to router for dynamic model resolution
-  if (upstreamRouter) {
-    upstreamRouter.setApiKeyPool(apiKeyPool, createAdapterForEntry);
-    if (hasApiKeys) console.log(`[Init] API key pool: ${apiKeyPool.getAll().length} key(s) loaded`);
-  }
+  // Create a single model cache instance shared across all routes.
+  const apiKeyModelCache = new ApiKeyModelCache();
 
   // Mount routes
   const authRoutes = createAuthRoutes(accountPool, refreshScheduler);
@@ -178,7 +175,8 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const messagesRoutes = createMessagesRoutes(accountPool, cookieJar, proxyPool, upstreamRouter);
   const geminiRoutes = createGeminiRoutes(accountPool, cookieJar, proxyPool, upstreamRouter);
   const responsesRoutes = createResponsesRoutes(accountPool, cookieJar, proxyPool, upstreamRouter);
-  const apiKeyRoutes = createApiKeyRoutes(apiKeyPool);
+  const apiKeyRoutes = createApiKeyRoutes(apiKeyPool, apiKeyModelCache);
+  const embeddingsRoutes = createEmbeddingsRoutes(accountPool, apiKeyPool);
   const proxyRoutes = createProxyRoutes(proxyPool, accountPool);
   const usageStats = new UsageStatsStore();
   usageStats.recoverBaseline(accountPool);
@@ -188,6 +186,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.route("/", authRoutes);
   app.route("/", accountRoutes);
   app.route("/", apiKeyRoutes);
+  app.route("/", embeddingsRoutes);
   app.route("/", chatRoutes);
   app.route("/", messagesRoutes);
   app.route("/", geminiRoutes);
@@ -244,6 +243,10 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   // Start usage stats snapshot timer (no upstream requests — quota is collected passively)
   startQuotaRefresh(accountPool, usageStats);
 
+  // Start active quota refresher — proactively syncs limit_reached / dirty accounts
+  const activeQuotaRefresher = new ActiveQuotaRefresher(accountPool, { cookieJar, proxyPool });
+  activeQuotaRefresher.start();
+
   // Start proxy health check timer (if proxies exist)
   proxyPool.startHealthCheckTimer();
 
@@ -274,6 +277,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
         stopProxyUpdateChecker();
         stopModelRefresh();
         stopQuotaRefresh();
+        activeQuotaRefresher.stop();
         stopSessionCleanup();
         refreshScheduler.destroy();
         proxyPool.destroy();

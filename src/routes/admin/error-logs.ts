@@ -2,8 +2,10 @@ import { Hono } from "hono";
 import { z } from "zod";
 import {
   appendErrorLog,
+  clearErrorLog,
   groupErrorLog,
   getUnreadCount,
+  getTotalCount,
   readErrorLog,
   setReadCursor,
   type ErrorSource,
@@ -46,8 +48,7 @@ export function createErrorLogRoutes(): Hono {
   });
 
   app.get("/admin/error-logs/count", (c) => {
-    const entries = readErrorLog();
-    return c.json({ total: entries.length, unread: getUnreadCount(entries) });
+    return c.json({ total: getTotalCount(), unread: getUnreadCount() });
   });
 
   app.post("/admin/error-logs/seen", (c) => {
@@ -57,6 +58,11 @@ export function createErrorLogRoutes(): Hono {
     const cursor = entries[0]?.ts ?? new Date().toISOString();
     setReadCursor(cursor);
     return c.json({ ok: true, cursor });
+  });
+
+  app.delete("/admin/error-logs", (c) => {
+    clearErrorLog();
+    return c.json({ ok: true });
   });
 
   app.post("/admin/error-logs/report", async (c) => {

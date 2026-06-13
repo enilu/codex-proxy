@@ -57,7 +57,7 @@ function buildApp(opts?: { noAccount?: boolean }): TestContext {
 
   const app = new Hono();
   app.use("*", requestId);
-  app.use("*", errorHandler);
+  app.onError(errorHandler);
   app.route("/", createMessagesRoutes(accountPool, cookieJar, proxyPool));
   app.route("/", createModelRoutes());
   app.route("/", createWebRoutes(accountPool));
@@ -82,6 +82,14 @@ afterEach(() => {
 
 function messagesRequest(body: unknown) {
   return ctx.app.request("/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function countTokensRequest(body: unknown) {
+  return ctx.app.request("/v1/messages/count_tokens?beta=true", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -115,6 +123,67 @@ function parseAnthropicSSE(text: string): Array<{ event: string; data: unknown }
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("E2E: POST /v1/messages", () => {
+  it("count_tokens: returns local Anthropic-compatible token estimate without upstream call", async () => {
+    const res = await countTokensRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hello from Claude Code" }],
+      tools: [{
+        name: "Read",
+        description: "Read a file from the local workspace",
+        input_schema: {
+          type: "object",
+          properties: {
+            file_path: { type: "string" },
+          },
+          required: ["file_path"],
+        },
+      }],
+      betas: ["token-efficient-tools-2025-02-19"],
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { input_tokens?: unknown };
+    expect(typeof body.input_tokens).toBe("number");
+    expect(body.input_tokens).toBeGreaterThan(0);
+    expect(body.input_tokens).toBeLessThan(500);
+    expect(getMockTransport().post).not.toHaveBeenCalled();
+  });
+
+  it("count_tokens: works without an authenticated Codex account", async () => {
+    const noAuth = buildApp({ noAccount: true });
+    try {
+      const res = await noAuth.app.request("/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          messages: [{ role: "user", content: "count only" }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as { input_tokens?: unknown };
+      expect(typeof body.input_tokens).toBe("number");
+      expect(body.input_tokens).toBeGreaterThan(0);
+    } finally {
+      noAuth.cookieJar.destroy();
+      noAuth.proxyPool.destroy();
+      noAuth.accountPool.destroy();
+    }
+  });
+
+  it("count_tokens: invalid requests return Anthropic error shape", async () => {
+    const res = await countTokensRequest({
+      model: "gpt-5.5",
+      messages: [],
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { type: string; error: { type: string } };
+    expect(body.type).toBe("error");
+    expect(body.error.type).toBe("invalid_request_error");
+  });
+
   // ── Anthropic SSE format ───────────────────────────────────────
 
   it("streaming: full Anthropic SSE event sequence", async () => {
@@ -163,7 +232,7 @@ describe("E2E: POST /v1/messages", () => {
     expect(typeof usage.output_tokens).toBe("number");
   });
 
-  it("uses Claude Code session id as prompt_cache_key", async () => {
+  it("maps Claude Code session id to an account-scoped upstream prompt_cache_key", async () => {
     const res = await ctx.app.request("/v1/messages", {
       method: "POST",
       headers: {
@@ -181,8 +250,15 @@ describe("E2E: POST /v1/messages", () => {
       throw new Error("Expected upstream transport body to be captured");
     }
 
-    const upstreamRequest = JSON.parse(transportBody) as { prompt_cache_key?: unknown };
-    expect(upstreamRequest.prompt_cache_key).toBe("claude-code-session-123");
+    const upstreamRequest = JSON.parse(transportBody) as {
+      prompt_cache_key?: unknown;
+      client_metadata?: Record<string, unknown>;
+    };
+    expect(upstreamRequest.prompt_cache_key).toMatch(/^cp_[0-9a-f]{32}$/);
+    expect(upstreamRequest.prompt_cache_key).not.toBe("claude-code-session-123");
+    expect(upstreamRequest.client_metadata?.["x-codex-window-id"]).toBe(
+      `${upstreamRequest.prompt_cache_key}:0`,
+    );
   });
 
   // ── Anthropic error format ─────────────────────────────────────

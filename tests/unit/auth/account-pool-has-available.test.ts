@@ -54,6 +54,10 @@ vi.mock("@src/models/model-store.js", () => ({
 import { AccountPool } from "@src/auth/account-pool.js";
 import { isTokenExpired } from "@src/auth/jwt-utils.js";
 import type { CodexQuota } from "@src/auth/types.js";
+import {
+  _resetAllCfChallengeCooldowns,
+  recordCfChallengeCooldown,
+} from "@src/auth/cf-challenge-cooldown.js";
 
 function makeQuota(overrides?: Partial<CodexQuota>): CodexQuota {
   return {
@@ -76,6 +80,7 @@ describe("AccountPool.hasAvailableAccounts", () => {
 
   beforeEach(() => {
     vi.mocked(isTokenExpired).mockReturnValue(false);
+    _resetAllCfChallengeCooldowns();
     pool = new AccountPool({ rotationStrategy: "least_used" });
   });
 
@@ -130,6 +135,12 @@ describe("AccountPool.hasAvailableAccounts", () => {
     expect(pool.hasAvailableAccounts([id1, id2])).toBe(false);
   });
 
+  it("returns false when all active accounts are in Cloudflare challenge cooldown", () => {
+    const id = pool.addAccount("token-a");
+    recordCfChallengeCooldown(id);
+    expect(pool.hasAvailableAccounts()).toBe(false);
+  });
+
   it("returns false when active accounts only have cached primary quota exhaustion", () => {
     const id = pool.addAccount("token-a");
     pool.updateCachedQuota(id, makeQuota({
@@ -182,5 +193,75 @@ describe("AccountPool.hasAvailableAccounts", () => {
     pool.addAccount("token-a");
     vi.mocked(isTokenExpired).mockReturnValue(true);
     expect(pool.hasAvailableAccounts()).toBe(false);
+  });
+});
+
+describe("AccountPool.isAuthenticated", () => {
+  let pool: AccountPool;
+
+  beforeEach(() => {
+    vi.mocked(isTokenExpired).mockReturnValue(false);
+    _resetAllCfChallengeCooldowns();
+    pool = new AccountPool({ rotationStrategy: "least_used" });
+  });
+
+  it("returns false for empty pool", () => {
+    expect(pool.isAuthenticated()).toBe(false);
+  });
+
+  it("returns true when an active non-exhausted account exists", () => {
+    pool.addAccount("token-a");
+    expect(pool.isAuthenticated()).toBe(true);
+  });
+
+  it("returns false when only quota-exhausted accounts exist and skip_exhausted=true (default)", () => {
+    const id = pool.addAccount("token-a");
+    pool.updateCachedQuota(id, makeQuota({
+      rate_limit: {
+        allowed: false,
+        limit_reached: true,
+        used_percent: 100,
+        reset_at: Math.floor(Date.now() / 1000) + 3600,
+        limit_window_seconds: 3600,
+      },
+    }));
+    expect(pool.isAuthenticated()).toBe(false);
+  });
+
+  it("returns true when only quota-exhausted accounts exist and skip_exhausted=false (P1 fix)", async () => {
+    const { getConfig } = await import("@src/config.js");
+    vi.mocked(getConfig).mockReturnValueOnce({
+      auth: {
+        jwt_token: null,
+        rotation_strategy: "least_used",
+        rate_limit_backoff_seconds: 60,
+        max_concurrent_per_account: 3,
+      },
+      quota: { skip_exhausted: false },
+    } as ReturnType<typeof getConfig>);
+
+    const id = pool.addAccount("token-a");
+    pool.updateCachedQuota(id, makeQuota({
+      rate_limit: {
+        allowed: false,
+        limit_reached: true,
+        used_percent: 100,
+        reset_at: Math.floor(Date.now() / 1000) + 3600,
+        limit_window_seconds: 3600,
+      },
+    }));
+    expect(pool.isAuthenticated()).toBe(true);
+  });
+
+  it("returns false when only disabled accounts exist, regardless of skip_exhausted", () => {
+    const id = pool.addAccount("token-a");
+    pool.markStatus(id, "disabled");
+    expect(pool.isAuthenticated()).toBe(false);
+  });
+
+  it("returns false when only active accounts are in Cloudflare challenge cooldown", () => {
+    const id = pool.addAccount("token-a");
+    recordCfChallengeCooldown(id);
+    expect(pool.isAuthenticated()).toBe(false);
   });
 });

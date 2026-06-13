@@ -36,6 +36,7 @@ describe("ApiKeyPool", () => {
     expect(entry.status).toBe("active");
     expect(entry.label).toBeNull();
     expect(entry.lastUsedAt).toBeNull();
+    expect(entry.capabilities).toEqual(["chat"]);
   });
 
   it("uses default baseUrl for builtin providers", () => {
@@ -86,6 +87,58 @@ describe("ApiKeyPool", () => {
     const results = pool.getByModel("gpt-5.4");
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe(e1.id);
+  });
+
+  it("filters active entries by model and capability", () => {
+    const chat = pool.add({
+      provider: "openai",
+      model: "text-embedding-3-small",
+      apiKey: "chat-key",
+      capabilities: ["chat"],
+    });
+    const embeddings = pool.add({
+      provider: "openai",
+      model: "text-embedding-3-small",
+      apiKey: "embedding-key",
+      capabilities: ["embeddings"],
+    });
+    const disabled = pool.add({
+      provider: "openai",
+      model: "text-embedding-3-small",
+      apiKey: "disabled-key",
+      capabilities: ["embeddings"],
+    });
+    pool.setStatus(disabled.id, "disabled");
+
+    expect(pool.getByModelAndCapability("text-embedding-3-small", "chat").map((entry) => entry.id)).toEqual([chat.id]);
+    expect(pool.getByModelAndCapability("text-embedding-3-small", "embeddings").map((entry) => entry.id)).toEqual([embeddings.id]);
+  });
+
+  it("loads legacy persisted entries without capabilities as chat-only", () => {
+    const persistence = createMemoryPersistence();
+    const pool1 = new ApiKeyPool(persistence);
+    pool1.add({ provider: "openai", model: "gpt-5.4", apiKey: "k1" });
+
+    const legacyEntry = pool1.getAll()[0];
+    const legacyPersistence: ApiKeyPersistence = {
+      load: () => [{
+        id: legacyEntry.id,
+        provider: legacyEntry.provider,
+        model: legacyEntry.model,
+        apiKey: legacyEntry.apiKey,
+        baseUrl: legacyEntry.baseUrl,
+        label: legacyEntry.label,
+        status: legacyEntry.status,
+        addedAt: legacyEntry.addedAt,
+        lastUsedAt: legacyEntry.lastUsedAt,
+      }],
+      save: () => {},
+    };
+
+    const pool2 = new ApiKeyPool(legacyPersistence);
+    expect(pool2.getAll()[0].capabilities).toEqual(["chat"]);
+    expect(pool2.getByModelAndCapability("gpt-5.4", "chat")).toHaveLength(1);
+    expect(pool2.getByModelAndCapability("gpt-5.4", "embeddings")).toHaveLength(0);
   });
 
   it("getByProvider returns active entries for that provider", () => {
@@ -179,16 +232,39 @@ describe("ApiKeyPool", () => {
     expect(exported[0].apiKey).toBe("sk-1234567890abcdef");
   });
 
-  it("exportForReimport returns all keys in importable format", () => {
-    pool.add({ provider: "anthropic", model: "claude-opus-4-6", apiKey: "k1", label: "Prod" });
+  it("exportForReimport omits builtin baseUrl so exports can be imported again", () => {
+    pool.add({
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      apiKey: "k1",
+      label: "Prod",
+      capabilities: ["chat", "embeddings"],
+    });
     const exported = pool.exportForReimport();
     expect(exported).toHaveLength(1);
     expect(exported[0]).toEqual({
       provider: "anthropic",
       model: "claude-opus-4-6",
       apiKey: "k1",
-      baseUrl: "https://api.anthropic.com/v1",
       label: "Prod",
+      capabilities: ["chat", "embeddings"],
+      wire: "anthropic",
+    });
+    expect(pool.importMany(exported).failed).toBe(0);
+  });
+
+  it("exportForReimport keeps custom baseUrl", () => {
+    pool.add({
+      provider: "custom",
+      model: "custom-model",
+      apiKey: "k1",
+      baseUrl: "https://custom.example.com/v1",
+      wire: "responses",
+    });
+    expect(pool.exportForReimport()[0]).toMatchObject({
+      provider: "custom",
+      baseUrl: "https://custom.example.com/v1",
+      wire: "responses",
     });
   });
 
@@ -202,5 +278,38 @@ describe("ApiKeyPool", () => {
     const pool2 = new ApiKeyPool(persistence);
     expect(pool2.getAll()).toHaveLength(1);
     expect(pool2.getAll()[0].model).toBe("gpt-5.4");
+  });
+
+  // ── Wire protocol ─────────────────────────────────────────────
+
+  it("normalizes wire by provider on add", () => {
+    expect(pool.add({ provider: "openai", model: "gpt-5.5", apiKey: "k" }).wire).toBe("chat");
+    expect(pool.add({ provider: "openai", model: "gpt-5.5", apiKey: "k", wire: "gemini" }).wire).toBe("chat");
+    expect(pool.add({ provider: "openai", model: "gpt-5.5", apiKey: "k", wire: "responses" }).wire).toBe("responses");
+    expect(pool.add({ provider: "anthropic", model: "claude", apiKey: "k", wire: "chat" }).wire).toBe("anthropic");
+    expect(pool.add({ provider: "gemini", model: "gemini", apiKey: "k", wire: "chat" }).wire).toBe("gemini");
+    expect(pool.add({ provider: "custom", model: "m", apiKey: "k", baseUrl: "https://x.dev/v1", wire: "responses" }).wire).toBe("responses");
+  });
+
+  it("migrates legacy persisted entries without a wire field to chat", () => {
+    // Simulate an api-keys.json written before the wire field existed.
+    const legacy = {
+      id: "legacy1",
+      provider: "openai",
+      model: "gpt-5.4",
+      apiKey: "k",
+      baseUrl: "https://api.openai.com/v1",
+      label: null,
+      capabilities: ["chat"],
+      status: "active",
+      addedAt: "2026-01-01T00:00:00Z",
+      lastUsedAt: null,
+    };
+    const persistence: ApiKeyPersistence = {
+      load: () => [legacy as unknown as ApiKeyEntry],
+      save: () => { /* noop */ },
+    };
+    const pool2 = new ApiKeyPool(persistence);
+    expect(pool2.getAll()[0].wire).toBe("chat");
   });
 });

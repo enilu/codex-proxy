@@ -1,6 +1,6 @@
 {
   "name": "codex-proxy",
-  "version": "2.0.75",
+  "version": "2.0.77",
   "description": "Reverse proxy that exposes Codex Desktop Responses API as OpenAI-compatible /v1/chat/completions",
   "type": "module",
   "workspaces": [
@@ -14,6 +14,7 @@
     "test:integration": "vitest run --include 'tests/integration/**/*.test.ts'",
     "test:stress": "vitest run --config tests/vitest.config.ts",
     "test:real": "vitest run --config tests/real/vitest.config.ts",
+    "test:web": "cd web && npx vitest run",
     "dev": "tsx watch src/index.ts",
     "dev:web": "cd web && npx vite",
     "build:web": "cd web && npx vite build",
@@ -30,6 +31,7 @@
   "dependencies": {
     "@electron/asar": "^3.2.0",
     "@hono/node-server": "^1.0.0",
+    "better-sqlite3": "^12.10.0",
     "hono": "^4.0.0",
     "https-proxy-agent": "^8.0.0",
     "js-yaml": "^4.1.0",
@@ -38,6 +40,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/js-yaml": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",

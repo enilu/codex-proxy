@@ -22,6 +22,18 @@ import { isBuiltinProvider, PROVIDER_CATALOG } from "./api-key-catalog.js";
 // ── Types ──────────────────────────────────────────────────────────
 
 export type ApiKeyStatus = "active" | "disabled" | "error";
+export const API_KEY_CAPABILITIES = ["chat", "embeddings"] as const;
+export type ApiKeyCapability = typeof API_KEY_CAPABILITIES[number];
+
+/**
+ * Upstream wire protocol for runtime API-key providers.
+ * "chat" → OpenAI-compatible POST /chat/completions.
+ * "responses" → OpenAI-compatible POST /responses.
+ * "anthropic" → Anthropic Messages API POST /messages.
+ * "gemini" → Gemini streamGenerateContent API.
+ */
+export const API_KEY_WIRES = ["chat", "responses", "anthropic", "gemini"] as const;
+export type ApiKeyWire = typeof API_KEY_WIRES[number];
 
 export interface ApiKeyEntry {
   id: string;
@@ -30,17 +42,24 @@ export interface ApiKeyEntry {
   apiKey: string;
   baseUrl: string;
   label: string | null;
+  capabilities: ApiKeyCapability[];
+  wire: ApiKeyWire;
   status: ApiKeyStatus;
   addedAt: string;
   lastUsedAt: string | null;
 }
 
+export type PersistedApiKeyEntry = Omit<ApiKeyEntry, "capabilities" | "wire"> & {
+  capabilities?: ApiKeyCapability[];
+  wire?: ApiKeyWire;
+};
+
 interface ApiKeysFile {
-  keys: ApiKeyEntry[];
+  keys: PersistedApiKeyEntry[];
 }
 
 export interface ApiKeyPersistence {
-  load(): ApiKeyEntry[];
+  load(): PersistedApiKeyEntry[];
   save(keys: ApiKeyEntry[]): void;
 }
 
@@ -52,7 +71,7 @@ function getApiKeysFile(): string {
 
 export function createFsApiKeyPersistence(): ApiKeyPersistence {
   return {
-    load(): ApiKeyEntry[] {
+    load(): PersistedApiKeyEntry[] {
       try {
         const file = getApiKeysFile();
         if (!existsSync(file)) return [];
@@ -87,7 +106,7 @@ export class ApiKeyPool {
 
   constructor(persistence?: ApiKeyPersistence) {
     this.persistence = persistence ?? createFsApiKeyPersistence();
-    this.entries = this.persistence.load();
+    this.entries = this.persistence.load().map(normalizeEntry);
   }
 
   // ── Query ──────────────────────────────────────────────────────
@@ -102,7 +121,25 @@ export class ApiKeyPool {
 
   /** Get all active entries for a given model (exact match). */
   getByModel(model: string): ApiKeyEntry[] {
-    return this.entries.filter((e) => e.model === model && e.status === "active");
+    return this.getByModelAndCapability(model, "chat");
+  }
+
+  /** Get all active entries for a given model and declared capability. */
+  getByModelAndCapability(model: string, capability: ApiKeyCapability): ApiKeyEntry[] {
+    return this.entries.filter((e) =>
+      e.model === model &&
+      e.status === "active" &&
+      e.capabilities.includes(capability),
+    );
+  }
+
+  /** Pick and mark the least recently used active entry for a model/capability. */
+  acquireByModelAndCapability(model: string, capability: ApiKeyCapability): ApiKeyEntry | undefined {
+    const entries = this.getByModelAndCapability(model, capability);
+    if (entries.length === 0) return undefined;
+    const entry = pickLeastRecentlyUsed(entries);
+    this.markUsed(entry.id);
+    return entry;
   }
 
   /** Get all active entries for a given provider. */
@@ -128,9 +165,12 @@ export class ApiKeyPool {
     apiKey: string;
     baseUrl?: string;
     label?: string | null;
+    capabilities?: ApiKeyCapability[];
+    wire?: ApiKeyWire;
   }): ApiKeyEntry {
-    const baseUrl = input.baseUrl
-      ?? (isBuiltinProvider(input.provider) ? PROVIDER_CATALOG[input.provider].defaultBaseUrl : "");
+    const baseUrl = isBuiltinProvider(input.provider)
+      ? PROVIDER_CATALOG[input.provider].defaultBaseUrl
+      : input.baseUrl ?? "";
 
     const entry: ApiKeyEntry = {
       id: randomBytes(8).toString("hex"),
@@ -139,6 +179,8 @@ export class ApiKeyPool {
       apiKey: input.apiKey,
       baseUrl,
       label: input.label ?? null,
+      capabilities: normalizeCapabilities(input.capabilities),
+      wire: normalizeWireForProvider(input.provider, input.wire),
       status: "active",
       addedAt: new Date().toISOString(),
       lastUsedAt: null,
@@ -187,6 +229,8 @@ export class ApiKeyPool {
     apiKey: string;
     baseUrl?: string;
     label?: string | null;
+    capabilities?: ApiKeyCapability[];
+    wire?: ApiKeyWire;
   }>): { added: number; failed: number; errors: string[] } {
     let added = 0;
     const errors: string[] = [];
@@ -216,15 +260,19 @@ export class ApiKeyPool {
     provider: ApiKeyProvider;
     model: string;
     apiKey: string;
-    baseUrl: string;
+    baseUrl?: string;
     label: string | null;
+    capabilities: ApiKeyCapability[];
+    wire: ApiKeyWire;
   }> {
     return this.entries.map((e) => ({
       provider: e.provider,
       model: e.model,
       apiKey: e.apiKey,
-      baseUrl: e.baseUrl,
+      ...(e.provider === "custom" ? { baseUrl: e.baseUrl } : {}),
       label: e.label,
+      capabilities: e.capabilities,
+      wire: e.wire,
     }));
   }
 
@@ -242,4 +290,56 @@ export class ApiKeyPool {
 function maskKey(key: string): string {
   if (key.length <= 8) return "****";
   return key.slice(0, 4) + "****" + key.slice(-4);
+}
+
+function isApiKeyCapability(value: unknown): value is ApiKeyCapability {
+  return value === "chat" || value === "embeddings";
+}
+
+function normalizeCapabilities(value: unknown): ApiKeyCapability[] {
+  if (!Array.isArray(value)) return ["chat"];
+  const capabilities = value.filter(isApiKeyCapability);
+  const deduped = [...new Set(capabilities)];
+  return deduped.length > 0 ? deduped : ["chat"];
+}
+
+function isApiKeyWire(value: unknown): value is ApiKeyWire {
+  return value === "chat" || value === "responses" || value === "anthropic" || value === "gemini";
+}
+
+function normalizeWire(value: unknown): ApiKeyWire {
+  return isApiKeyWire(value) ? value : "chat";
+}
+
+function normalizeWireForProvider(provider: ApiKeyProvider, value: unknown): ApiKeyWire {
+  const wire = normalizeWire(value);
+  if (provider === "custom") return wire;
+  if (provider === "openai" || provider === "openrouter") {
+    return wire === "responses" ? "responses" : "chat";
+  }
+  if (provider === "anthropic") return "anthropic";
+  if (provider === "gemini") return "gemini";
+  return "chat";
+}
+
+function normalizeEntry(entry: PersistedApiKeyEntry): ApiKeyEntry {
+  const baseUrl = isBuiltinProvider(entry.provider)
+    ? PROVIDER_CATALOG[entry.provider].defaultBaseUrl
+    : entry.baseUrl;
+  return {
+    ...entry,
+    baseUrl,
+    capabilities: normalizeCapabilities(entry.capabilities),
+    wire: normalizeWireForProvider(entry.provider, entry.wire),
+  };
+}
+
+function pickLeastRecentlyUsed(entries: ApiKeyEntry[]): ApiKeyEntry {
+  let best = entries[0];
+  for (let i = 1; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry.lastUsedAt) return entry;
+    if (!best.lastUsedAt || entry.lastUsedAt < best.lastUsedAt) best = entry;
+  }
+  return best;
 }

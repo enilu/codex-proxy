@@ -23,6 +23,7 @@ export interface CreateImplicitResumeLifecycleOptions {
   tag: string;
   implicitPrevRespId: string | null;
   continuationInputStart: number;
+  reasoningReplayItems?: ProxyRequest["codexRequest"]["input"];
   resumeEvaluationInput: ImplicitResumeEvaluationInput;
   acquiredEntryId: string;
   warn?: ImplicitResumeWarn;
@@ -31,6 +32,7 @@ export interface CreateImplicitResumeLifecycleOptions {
 export interface ImplicitResumeLifecycle {
   evaluation: ImplicitResumeEvaluation;
   activate(): void;
+  canReplayAfterError(err: unknown): boolean;
   getUsageHint(): UsageHint | undefined;
   isActive(): boolean;
   logSkippedWarnings(): void;
@@ -49,6 +51,7 @@ export function createImplicitResumeLifecycle(
     tag,
     implicitPrevRespId,
     continuationInputStart,
+    reasoningReplayItems,
     resumeEvaluationInput,
     acquiredEntryId,
     warn = console.warn,
@@ -77,6 +80,7 @@ export function createImplicitResumeLifecycle(
         implicitPrevRespId,
         continuationInputStart,
         affinityMap,
+        reasoningReplayItems,
       });
       active = true;
     },
@@ -100,6 +104,9 @@ export function createImplicitResumeLifecycle(
           evaluation.unansweredCallIds.slice(0, 3).join(","),
         );
       }
+    },
+    canReplayAfterError(err: unknown): boolean {
+      return shouldReplayFullInputAfterImplicitResumeError(err, active);
     },
     replayFullInputAfterError(err: unknown): boolean {
       if (!shouldReplayFullInputAfterImplicitResumeError(err, active)) return false;

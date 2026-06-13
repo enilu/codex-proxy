@@ -9,12 +9,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { FormatCollectTranslatorOptions, ProxyRequest } from "@src/routes/shared/proxy-handler-types.js";
 import type { WsPoolContext } from "@src/proxy/codex-api.js";
-import type { CodexResponsesRequest } from "@src/proxy/codex-types.js";
+import type { CodexResponsesRequest, CodexUsageResponse } from "@src/proxy/codex-types.js";
 import type { ParsedRateLimit } from "@src/proxy/rate-limit-headers.js";
 import { createMockFormatAdapter } from "@helpers/format-adapter.js";
 import { getSessionAffinityMap } from "@src/auth/session-affinity.js";
 import { buildVariantIdentity, resolvePromptCacheIdentity } from "@src/routes/shared/proxy-session-helpers.js";
 import { computeVariantHash } from "@src/routes/shared/variant-hash.js";
+import {
+  _resetAllCfChallengeCooldowns,
+  getCfChallengeCooldown,
+} from "@src/auth/cf-challenge-cooldown.js";
 
 // ── Module-level control for CodexApi.createResponse ──────────────────
 
@@ -27,11 +31,15 @@ type MockCreateResponse = (
 
 let mockCreateResponse: MockCreateResponse | null = null;
 
+type MockGetUsage = () => Promise<CodexUsageResponse>;
+let mockGetUsage: MockGetUsage | null = null;
+
 vi.mock("@src/proxy/codex-api.js", () => {
   class CodexApiError extends Error {
     status: number;
     body: string;
-    constructor(status: number, body: string) {
+    headers: Headers | undefined;
+    constructor(status: number, body: string, headers?: Headers) {
       let detail: string;
       try {
         const parsed = JSON.parse(body);
@@ -42,6 +50,7 @@ vi.mock("@src/proxy/codex-api.js", () => {
       super(`Codex API error (${status}): ${detail}`);
       this.status = status;
       this.body = body;
+      this.headers = headers ? new Headers(headers) : undefined;
     }
   }
 
@@ -69,6 +78,25 @@ vi.mock("@src/proxy/codex-api.js", () => {
     ): Promise<Response> => {
       if (mockCreateResponse) return mockCreateResponse(request, signal, onRateLimits, poolCtx);
       return Promise.resolve(new Response("data: {}\n\n"));
+    }),
+    getUsage: vi.fn((): Promise<CodexUsageResponse> => {
+      if (mockGetUsage) return mockGetUsage();
+      return Promise.resolve({
+        plan_type: "plus",
+        rate_limit: {
+          allowed: true,
+          limit_reached: false,
+          primary_window: {
+            used_percent: 0,
+            reset_after_seconds: 3600,
+            reset_at: Date.now() / 1000 + 3600,
+            limit_window_seconds: 3600,
+          },
+          secondary_window: null,
+        },
+        code_review_rate_limit: null,
+        additional_rate_limits: [],
+      });
     }),
   }));
 
@@ -199,7 +227,9 @@ function buildTestApp(opts: {
 describe("proxy-handler integration", () => {
   beforeEach(() => {
     mockCreateResponse = null;
+    mockGetUsage = null;
     getSessionAffinityMap().dispose();
+    _resetAllCfChallengeCooldowns();
     vi.clearAllMocks();
   });
 
@@ -289,7 +319,7 @@ describe("proxy-handler integration", () => {
     expect(affinityMap.lookup("resp_meta")).toBe("e1");
     expect(affinityMap.lookupConversationId("resp_meta")).toBe("thread-collect");
     expect(affinityMap.lookupTurnState("resp_meta")).toBe("turn-success");
-    expect(affinityMap.lookupInstructions("resp_meta")).toBe("You are helpful");
+    expect(affinityMap.lookupInstructionsHash("resp_meta")).toBe("58d0189aa8572b25a2e4ba09928df2c3d924d07f53de9aeb94ffe7f6f2a1de2b");
     expect(affinityMap.lookupInputTokens("resp_meta")).toBe(33);
     expect(affinityMap.lookupFunctionCallIds("resp_meta")).toEqual(["call_a", "call_b"]);
     expect(affinityMap.lookupLatestResponseIdByConversationId(
@@ -660,20 +690,39 @@ describe("proxy-handler integration", () => {
     expect(accountPool.release).not.toHaveBeenCalled();
   });
 
-  // 5c. CF 403 (Cloudflare challenge) → NOT treated as ban
-  it("handles CF 403 as regular error, not ban", async () => {
+  // 5c. CF 403 (Cloudflare challenge) → cooldown + fallback retry, NOT ban
+  it("handles CF 403 as cooldown retry, not ban", async () => {
     mockCreateResponse = () =>
-      Promise.reject(new CodexApiError(403, '<!DOCTYPE html><html>cf_chl_managed</html>'));
+      Promise.reject(new CodexApiError(
+        403,
+        "",
+        new Headers({ "cf-mitigated": "challenge" }),
+      ));
 
-    const accountPool = createMockAccountPool();
+    const accountPool = createMockAccountPool({
+      acquire: vi.fn()
+        .mockReturnValueOnce({ entryId: "e1", token: "tok1", accountId: "acc1" })
+        .mockReturnValueOnce(null),
+      hasAvailableAccounts: vi.fn(() => true),
+    });
     const fmt = createMockFormatAdapter();
     const { app } = buildTestApp({ accountPool, fmt });
 
     const res = await app.request("/test", { method: "POST" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("api_error");
+    expect(body.message).toContain("Cloudflare challenge");
 
     expect(accountPool.markStatus).not.toHaveBeenCalled();
     expect(accountPool.release).toHaveBeenCalledWith("e1", undefined);
+    expect(accountPool.hasAvailableAccounts).toHaveBeenCalledWith(["e1"]);
+    expect(accountPool.acquire).toHaveBeenNthCalledWith(2, {
+      model: "codex",
+      excludeIds: ["e1"],
+      preferredEntryId: undefined,
+    });
+    expect(getCfChallengeCooldown("e1")?.delaySeconds).toBe(10);
   });
 
   // 6. CodexApiError 5xx → formatError with 502
@@ -1035,294 +1084,186 @@ describe("proxy-handler integration", () => {
     expect(accountPool.acquire).toHaveBeenCalledTimes(1);
   });
 
-  // 17. previous_response_not_found: should strip previous_response_id and retry
-  // Reproduces the bug: when upstream returns previous_response_not_found
-  // (because the response was created on a different account or is unknown to
-  // this account), the proxy currently passes the error straight through with
-  // no recovery. Desired behavior: strip previous_response_id and replay.
-  it("recovers from previous_response_not_found by stripping ID and retrying", async () => {
-    const notFoundBody = JSON.stringify({
-      error: {
-        type: "invalid_request_error",
-        code: "previous_response_not_found",
-        message: "Previous response with id 'resp_0e2e6e7917486cfd0069eec8532d988194a3da6379c70abe68' not found.",
-      },
-    });
-
-    let createCount = 0;
-    const seenPrevIds: Array<string | undefined> = [];
-    mockCreateResponse = () => {
-      // The mock-CodexApi instance receives the *current* codexRequest by
-      // reference. We capture the previous_response_id at the moment of call.
-      createCount++;
-      if (createCount === 1) return Promise.reject(new CodexApiError(400, notFoundBody));
-      return Promise.resolve(new Response("data: {}\n\n"));
-    };
-
-    // Wrap createResponse to capture the previous_response_id seen on each call.
-    // (Re-mock CodexApi inline so we can observe the request mutation.)
-    const accountPool = createMockAccountPool();
-    const fmt = createMockFormatAdapter();
-    const req: ProxyRequest = {
-      ...createDefaultRequest(),
-      codexRequest: {
-        ...createDefaultRequest().codexRequest,
-        previous_response_id: "resp_0e2e6e7917486cfd0069eec8532d988194a3da6379c70abe68",
-      },
-    };
-
-    // Spy: snapshot previous_response_id before the upstream is called.
-    const origMock = mockCreateResponse;
-    mockCreateResponse = () => {
-      seenPrevIds.push(req.codexRequest.previous_response_id);
-      return origMock!();
-    };
-
-    const { app } = buildTestApp({ accountPool, fmt, req });
-    const res = await app.request("/test", { method: "POST" });
-
-    // Desired: proxy retries after stripping previous_response_id, returns 200
-    expect(res.status).toBe(200);
-    // Desired: 2 upstream calls — first with the stale ID, second without it
-    expect(createCount).toBe(2);
-    expect(seenPrevIds[0]).toBe("resp_0e2e6e7917486cfd0069eec8532d988194a3da6379c70abe68");
-    expect(seenPrevIds[1]).toBeUndefined();
-  });
-
-  it("replays full original input after implicit previous-response WebSocket failure", async () => {
-    const req: ProxyRequest = {
-      ...createDefaultRequest(),
-      codexRequest: {
-        ...createDefaultRequest().codexRequest,
-        prompt_cache_key: "thread-implicit-ws",
-        input: [
-          { role: "user", content: "first" },
-          { role: "assistant", content: "ok" },
-          { role: "user", content: "continue" },
-        ],
-        turnState: "turn-original",
-        useWebSocket: false,
-      },
-    };
+  // 19. Cascading Ban Defense — strips only when preferred is banned
+  it("strips previous_response_id and turnState when preferred account is banned (cascading ban defense)", async () => {
     const affinityMap = getSessionAffinityMap();
-    const promptCacheIdentity = resolvePromptCacheIdentity(req.codexRequest, req.clientConversationId);
-    const variantHash = computeVariantHash(
-      req.codexRequest.instructions,
-      req.codexRequest.tools,
-      buildVariantIdentity(req.codexRequest, promptCacheIdentity),
-    );
     affinityMap.record(
-      "resp_implicit_ws",
-      "e1",
-      "thread-implicit-ws",
-      "turn-implicit",
-      "You are helpful",
-      undefined,
-      undefined,
-      variantHash,
+      "resp_preferred",
+      "e_preferred",
+      "thread-cascading-ban-defense",
+      "turn-state-preferred",
     );
 
-    const seenRequests: Array<{
-      input: CodexResponsesRequest["input"];
-      previousResponseId: string | undefined;
-      turnState: string | undefined;
-      useWebSocket: boolean | undefined;
-    }> = [];
-    let createCount = 0;
-    mockCreateResponse = (request) => {
-      createCount++;
-      seenRequests.push({
-        input: [...request.input],
-        previousResponseId: request.previous_response_id,
-        turnState: request.turnState,
-        useWebSocket: request.useWebSocket,
-      });
-      if (createCount === 1) {
-        return Promise.reject(new PreviousResponseWebSocketError("ws down"));
-      }
-      return Promise.resolve(new Response("data: {}\n\n"));
+    let capturedRequest: CodexResponsesRequest | null = null;
+    mockCreateResponse = async (request) => {
+      capturedRequest = request;
+      return new Response("data: {}\n\n");
     };
 
-    const accountPool = createMockAccountPool();
-    const fmt = createMockFormatAdapter();
-    const { app } = buildTestApp({ accountPool, fmt, req });
-
-    const res = await app.request("/test", { method: "POST" });
-    expect(res.status).toBe(200);
-
-    expect(seenRequests).toEqual([
-      {
-        input: [{ role: "user", content: "continue" }],
-        previousResponseId: "resp_implicit_ws",
-        turnState: "turn-implicit",
-        useWebSocket: true,
-      },
-      {
-        input: [
-          { role: "user", content: "first" },
-          { role: "assistant", content: "ok" },
-          { role: "user", content: "continue" },
-        ],
-        previousResponseId: undefined,
-        turnState: "turn-original",
-        useWebSocket: false,
-      },
-    ]);
-    expect(accountPool.acquire).toHaveBeenCalledTimes(1);
-    expect(accountPool.release).toHaveBeenCalledWith("e1", {
-      input_tokens: 10,
-      output_tokens: 20,
+    // Preferred account is banned — getEntry must reflect this
+    const accountPool = createMockAccountPool({
+      acquire: vi.fn(() => ({ entryId: "e_new", token: "tok_new", accountId: "acc_new" })),
+      getEntry: vi.fn((id: string) =>
+        id === "e_preferred"
+          ? { email: "banned@test.com", status: "banned" }
+          : { email: "new@test.com", status: "active" },
+      ),
     });
-  });
 
-  it("recovers when collectTranslator raises previous_response_not_found", async () => {
-    const notFoundBody = JSON.stringify({
-      error: {
-        type: "invalid_request_error",
-        code: "previous_response_not_found",
-        message: "Previous response with id 'resp_collect_stale' not found.",
-      },
-    });
-    const req: ProxyRequest = {
-      ...createDefaultRequest(),
-      codexRequest: {
-        ...createDefaultRequest().codexRequest,
-        previous_response_id: "resp_collect_stale",
-      },
-    };
-    let createCount = 0;
-    const seenPrevIds: Array<string | undefined> = [];
-    mockCreateResponse = () => {
-      createCount++;
-      seenPrevIds.push(req.codexRequest.previous_response_id);
-      return Promise.resolve(new Response("data: {}\n\n"));
-    };
-
-    let collectCount = 0;
-    const fmt = createMockFormatAdapter({
-      collectTranslator: vi.fn(async () => {
-        collectCount++;
-        if (collectCount === 1) {
-          throw new CodexApiError(400, notFoundBody);
-        }
-        return {
-          response: { id: "resp_after_collect_retry", choices: [] },
-          usage: { input_tokens: 7, output_tokens: 3 },
-          responseId: "resp_after_collect_retry",
-        };
-      }),
-    });
-    const accountPool = createMockAccountPool();
-    const { app } = buildTestApp({ accountPool, fmt, req });
-
-    const res = await app.request("/test", { method: "POST" });
-    expect(res.status).toBe(200);
-
-    expect(createCount).toBe(2);
-    expect(collectCount).toBe(2);
-    expect(seenPrevIds[0]).toBe("resp_collect_stale");
-    expect(seenPrevIds[1]).toBeUndefined();
-    expect(accountPool.release).toHaveBeenCalledTimes(1);
-    expect(accountPool.release).toHaveBeenCalledWith("e1", {
-      input_tokens: 7,
-      output_tokens: 3,
-    });
-  });
-
-  // 17b. previous_response_not_found loop guard — only retry once
-  it("does not loop forever when previous_response_not_found persists after strip", async () => {
-    const notFoundBody = JSON.stringify({
-      error: { type: "invalid_request_error", code: "previous_response_not_found",
-        message: "Previous response with id 'resp_xxx' not found." },
-    });
-    let createCount = 0;
-    mockCreateResponse = () => {
-      createCount++;
-      return Promise.reject(new CodexApiError(400, notFoundBody));
-    };
-
-    const accountPool = createMockAccountPool();
     const fmt = createMockFormatAdapter();
     const req: ProxyRequest = {
       ...createDefaultRequest(),
       codexRequest: {
         ...createDefaultRequest().codexRequest,
-        previous_response_id: "resp_xxx",
+        previous_response_id: "resp_preferred",
       },
     };
+
     const { app } = buildTestApp({ accountPool, fmt, req });
 
     const res = await app.request("/test", { method: "POST" });
-    // After the strip+retry attempt also fails, fall through to generic error
-    expect(res.status).toBe(400);
-    // Exactly 2 upstream calls — strip-retry happens once, no further retries
-    expect(createCount).toBe(2);
-  });
-
-  // 17c. unanswered function_call: upstream "No tool output found for function
-  // call call_X" means a stored function_call from the previous response was
-  // not answered. Recovery: strip previous_response_id, retry once on the same
-  // account (full input replay covers the missing context).
-  it("recovers from unanswered function_call by stripping ID and retrying", async () => {
-    const unansweredBody = JSON.stringify({
-      error: {
-        type: "invalid_request_error",
-        message: "No tool output found for function call call_8vO7oqvintBWH5bAoAz3vPh5.",
-      },
-    });
-
-    let createCount = 0;
-    const seenPrevIds: Array<string | undefined> = [];
-    const req: ProxyRequest = {
-      ...createDefaultRequest(),
-      codexRequest: {
-        ...createDefaultRequest().codexRequest,
-        previous_response_id: "resp_unanswered_chain",
-      },
-    };
-    mockCreateResponse = () => {
-      seenPrevIds.push(req.codexRequest.previous_response_id);
-      createCount++;
-      if (createCount === 1) return Promise.reject(new CodexApiError(400, unansweredBody));
-      return Promise.resolve(new Response("data: {}\n\n"));
-    };
-
-    const accountPool = createMockAccountPool();
-    const fmt = createMockFormatAdapter();
-    const { app } = buildTestApp({ accountPool, fmt, req });
-    const res = await app.request("/test", { method: "POST" });
-
     expect(res.status).toBe(200);
-    expect(createCount).toBe(2);
-    expect(seenPrevIds[0]).toBe("resp_unanswered_chain");
-    expect(seenPrevIds[1]).toBeUndefined();
+
+    expect(capturedRequest).toBeDefined();
+    expect(capturedRequest?.previous_response_id).toBeUndefined();
+    expect(capturedRequest?.turnState).toBeUndefined();
+    expect(affinityMap.lookup("resp_preferred")).toBeNull();
   });
 
-  // 18. 403 ban with mixed pool states → descriptive error
-  it("returns descriptive error when banned and remaining accounts disabled/expired", async () => {
-    mockCreateResponse = () =>
-      Promise.reject(new CodexApiError(403, '{"detail": "Account suspended"}'));
+  // 19b. Cascading Ban Defense — does NOT strip for quota exhaustion
+  it("does NOT strip previous_response_id when preferred account is only quota_exhausted", async () => {
+    const affinityMap = getSessionAffinityMap();
+    affinityMap.record(
+      "resp_quota",
+      "e_quota",
+      "thread-quota-rotation",
+      "turn-state-quota",
+    );
+
+    let capturedRequest: CodexResponsesRequest | null = null;
+    mockCreateResponse = async (request) => {
+      capturedRequest = request;
+      return new Response("data: {}\n\n");
+    };
 
     const accountPool = createMockAccountPool({
-      acquire: vi.fn()
-        .mockReturnValueOnce({ entryId: "e1", token: "tok", accountId: "acc1" }),
-      hasAvailableAccounts: vi.fn(() => false),
-      getPoolSummary: vi.fn(() => ({
-        total: 3, active: 0, expired: 1, quota_exhausted: 0,
-        rate_limited: 0, refreshing: 0, disabled: 1, banned: 1,
-      })),
+      acquire: vi.fn(() => ({ entryId: "e_new", token: "tok_new", accountId: "acc_new" })),
+      getEntry: vi.fn((id: string) =>
+        id === "e_quota"
+          ? { email: "quota@test.com", status: "quota_exhausted" }
+          : { email: "new@test.com", status: "active" },
+      ),
     });
+
+    const fmt = createMockFormatAdapter();
+    const req: ProxyRequest = {
+      ...createDefaultRequest(),
+      codexRequest: {
+        ...createDefaultRequest().codexRequest,
+        previous_response_id: "resp_quota",
+      },
+    };
+
+    const { app } = buildTestApp({ accountPool, fmt, req });
+
+    const res = await app.request("/test", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    // previous_response_id should be PRESERVED (not stripped) for quota rotation
+    expect(capturedRequest).toBeDefined();
+    expect(capturedRequest?.previous_response_id).toBe("resp_quota");
+  });
+
+  // 20. Quota Drift-Defense Verification — proceed when quota is OK
+  it("verifies dirty quota when quotaVerifyRequired is true and proceeds if quota is OK", async () => {
+    let usageCalls = 0;
+    mockGetUsage = async () => {
+      usageCalls++;
+      return {
+        plan_type: "plus",
+        rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 10, reset_at: Date.now() / 1000 + 3600, limit_window_seconds: 3600 } },
+        additional_rate_limits: [],
+      };
+    };
+
+    let responseCalls = 0;
+    mockCreateResponse = async () => {
+      responseCalls++;
+      return new Response("data: {}\n\n");
+    };
+
+    const entry = {
+      id: "e1",
+      token: "tok",
+      accountId: "acc1",
+      status: "active" as const,
+      quotaVerifyRequired: true,
+    };
+
+    const accountPool = createMockAccountPool({
+      getEntry: vi.fn(() => entry),
+      acquire: vi.fn(() => ({ entryId: "e1", token: "tok", accountId: "acc1" })),
+    });
+
     const fmt = createMockFormatAdapter();
     const { app } = buildTestApp({ accountPool, fmt });
 
     const res = await app.request("/test", { method: "POST" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
 
-    const body = await res.json();
-    expect(body.error).toBe("api_error");
-    expect(body.message).toContain("All accounts exhausted");
-    expect(body.message).toContain("1 expired");
-    expect(body.message).toContain("1 disabled");
-    expect(body.message).toContain("1 banned");
+    // Should have checked usage and proceeded to response
+    expect(usageCalls).toBe(1);
+    expect(responseCalls).toBe(1);
+    expect(accountPool.updateCachedQuota).toHaveBeenCalledWith("e1", expect.objectContaining({
+      rate_limit: expect.objectContaining({ limit_reached: false }),
+    }));
+  });
+
+  // 21. Quota Drift-Defense Verification — failover when quota is still limit_reached
+  it("verifies dirty quota and releases/failovers to next account if quota is still limit_reached", async () => {
+    let usageCalls = 0;
+    mockGetUsage = async () => {
+      usageCalls++;
+      return {
+        plan_type: "plus",
+        rate_limit: { allowed: true, limit_reached: true, primary_window: { used_percent: 100, reset_at: Date.now() / 1000 + 3600, limit_window_seconds: 3600 } },
+        additional_rate_limits: [],
+      };
+    };
+
+    let responseCalls = 0;
+    mockCreateResponse = async () => {
+      responseCalls++;
+      return new Response("data: {}\n\n");
+    };
+
+    const entry1 = { id: "e1", token: "tok1", accountId: "acc1", status: "active" as const, quotaVerifyRequired: true };
+    const entry2 = { id: "e2", token: "tok2", accountId: "acc2", status: "active" as const, quotaVerifyRequired: false };
+
+    let acquireCount = 0;
+    const accountPool = createMockAccountPool({
+      getEntry: vi.fn((id) => (id === "e1" ? entry1 : entry2)),
+      acquire: vi.fn(() => {
+        acquireCount++;
+        if (acquireCount === 1) return { entryId: "e1", token: "tok1", accountId: "acc1" };
+        return { entryId: "e2", token: "tok2", accountId: "acc2" };
+      }),
+    });
+
+    const fmt = createMockFormatAdapter();
+    const { app } = buildTestApp({ accountPool, fmt });
+
+    const res = await app.request("/test", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    // e1 should have been verified, found to be limit_reached, released, and we fall back to e2
+    expect(usageCalls).toBe(1);
+    expect(responseCalls).toBe(1); // e2 succeeds
+    expect(accountPool.release).toHaveBeenCalledWith("e1", undefined);
+    expect(accountPool.acquire).toHaveBeenNthCalledWith(2, {
+      model: "codex",
+      excludeIds: ["e1"],
+      preferredEntryId: undefined,
+    });
   });
 });

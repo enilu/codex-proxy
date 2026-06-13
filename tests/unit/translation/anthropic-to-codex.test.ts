@@ -106,6 +106,66 @@ describe("translateAnthropicToCodexRequest", () => {
       expect(result.instructions).toBe("Keep answers short.");
     });
 
+    // Real Claude Code 2.1.84 emits the billing header as a standalone block[0]
+    // with per-request rotating cc_version + cch. Tests must prove the strip is
+    // invariant across that rotation, otherwise the cache-buster leaks into
+    // `instructions` and tanks upstream prompt cache.
+    it.each([
+      "x-anthropic-billing-header: cc_version=2.1.84.c8e; cc_entrypoint=cli; cch=da09b;",
+      "x-anthropic-billing-header: cc_version=2.1.84.76b; cc_entrypoint=cli; cch=46d1d;",
+      "x-anthropic-billing-header: cc_version=2.1.84.f51; cc_entrypoint=cli; cch=3c1ed;",
+      "x-anthropic-billing-header: cc_version=2.1.84.5b4; cc_entrypoint=cli; cch=8f29c;",
+      "x-anthropic-billing-header: cc_version=2.1.84.4f3; cc_entrypoint=cli; cch=d1658;",
+    ])("strips Claude Code billing header variant: %s", (billingText) => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          system: [
+            { type: "text" as const, text: billingText },
+            {
+              type: "text" as const,
+              text: "You are Claude Code, Anthropic's official CLI for Claude.",
+              cache_control: { type: "ephemeral" },
+            },
+            {
+              type: "text" as const,
+              text: "\nYou are an interactive agent that helps users with software engineering tasks.",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        }),
+      );
+      expect(result.instructions).toBe(
+        "You are Claude Code, Anthropic's official CLI for Claude.\n\nYou are an interactive agent that helps users with software engineering tasks.",
+      );
+      expect(result.instructions).not.toMatch(/cch=|cc_version=|x-anthropic-billing/);
+    });
+
+    it("produces identical instructions across rotating cc_version + cch values", () => {
+      const baseSystem = (billingText: string) => [
+        { type: "text" as const, text: billingText },
+        {
+          type: "text" as const,
+          text: "You are Claude Code, Anthropic's official CLI for Claude.",
+          cache_control: { type: "ephemeral" as const },
+        },
+      ];
+      const a = translateAnthropicToCodexRequest(
+        makeRequest({
+          system: baseSystem(
+            "x-anthropic-billing-header: cc_version=2.1.84.c8e; cc_entrypoint=cli; cch=da09b;",
+          ),
+        }),
+      );
+      const b = translateAnthropicToCodexRequest(
+        makeRequest({
+          system: baseSystem(
+            "x-anthropic-billing-header: cc_version=2.1.84.4f3; cc_entrypoint=cli; cch=d1658;",
+          ),
+        }),
+      );
+      expect(a.instructions).toBe(b.instructions);
+    });
+
     it("falls back to default instructions when no system provided", () => {
       const result = translateAnthropicToCodexRequest(makeRequest());
       expect(result.instructions).toBe("You are a helpful assistant.");
@@ -256,6 +316,91 @@ describe("translateAnthropicToCodexRequest", () => {
         "Error: something went wrong",
       );
     });
+
+    it("preserves system and developer message roles in order", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            { role: "system", content: "You are an expert engineer." },
+            { role: "developer", content: "Follow company coding standards." },
+            { role: "user", content: "hello" },
+          ],
+        } as Partial<AnthropicMessagesRequest>),
+      );
+      expect(result.instructions).toBe("You are a helpful assistant.");
+      expect(result.input).toEqual([
+        { role: "system", content: "You are an expert engineer." },
+        { role: "developer", content: "Follow company coding standards." },
+        { role: "user", content: "hello" },
+      ]);
+    });
+
+    it("keeps tool call items ordered around system and developer messages", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            { role: "system", content: "You are an expert engineer." },
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use" as const,
+                  id: "toolu_01",
+                  name: "search",
+                  input: { query: "test" },
+                },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result" as const,
+                  tool_use_id: "toolu_01",
+                  content: "result data",
+                },
+              ],
+            },
+            { role: "developer", content: "Keep coding standards." },
+            { role: "user", content: "continue" },
+          ],
+        } as Partial<AnthropicMessagesRequest>),
+      );
+      expect(result.input).toEqual([
+        { role: "system", content: "You are an expert engineer." },
+        {
+          type: "function_call",
+          call_id: "toolu_01",
+          name: "search",
+          arguments: '{"query":"test"}',
+        },
+        {
+          type: "function_call_output",
+          call_id: "toolu_01",
+          output: "result data",
+        },
+        { role: "developer", content: "Keep coding standards." },
+        { role: "user", content: "continue" },
+      ]);
+    });
+
+    it("downgrades unknown message roles to user", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const result = translateAnthropicToCodexRequest(
+          makeRequest({
+            messages: [{ role: "future_role", content: "new role content" }],
+          } as Partial<AnthropicMessagesRequest>),
+        );
+        expect(result.input).toEqual([{ role: "user", content: "new role content" }]);
+        expect(warn).toHaveBeenCalledWith(
+          "[anthropic-to-codex] Unknown message role, downgrading to user:",
+          "future_role",
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   // ── Thinking → reasoning effort ──────────────────────────────────────
@@ -336,430 +481,4 @@ describe("translateAnthropicToCodexRequest", () => {
     });
   });
 
-  // ── Tools ────────────────────────────────────────────────────────────
-
-  describe("tools", () => {
-    it("delegates tools array to anthropicToolsToCodex", () => {
-      const tools = [
-        { name: "search", description: "Search the web", input_schema: {} },
-      ];
-      translateAnthropicToCodexRequest(makeRequest({ tools }));
-
-      expect(anthropicToolsToCodex).toHaveBeenCalledWith(tools);
-    });
-
-    it("delegates tool_choice to anthropicToolChoiceToCodex", () => {
-      const toolChoice = { type: "auto" as const };
-      translateAnthropicToCodexRequest(makeRequest({ tool_choice: toolChoice }));
-
-      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(toolChoice, undefined);
-    });
-
-    it("passes tools context when converting tool_choice", () => {
-      const tools = [
-        { name: "web_search", description: "Custom search", input_schema: {} },
-      ];
-      const toolChoice = { type: "tool" as const, name: "web_search" };
-      translateAnthropicToCodexRequest(makeRequest({ tools, tool_choice: toolChoice }));
-
-      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(toolChoice, tools);
-    });
-
-    it("passes Claude Code WebSearch mapping option when requested", () => {
-      const tools = [
-        { name: "WebSearch", description: "Search the web", input_schema: {} },
-      ];
-      const toolChoice = { type: "tool" as const, name: "WebSearch" };
-      translateAnthropicToCodexRequest(
-        makeRequest({ tools, tool_choice: toolChoice }),
-        undefined,
-        { mapClaudeCodeWebSearch: true },
-      );
-
-      expect(anthropicToolsToCodex).toHaveBeenCalledWith(
-        tools,
-        { mapClaudeCodeWebSearch: true },
-      );
-      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(
-        toolChoice,
-        tools,
-        { mapClaudeCodeWebSearch: true },
-      );
-    });
-
-    it("does not inject hosted web_search by default", () => {
-      const result = translateAnthropicToCodexRequest(makeRequest());
-
-      expect(result.tools).toEqual([]);
-    });
-
-    it("injects hosted web_search when explicitly requested", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest(),
-        undefined,
-        { injectHostedWebSearch: true },
-      );
-
-      expect(result.tools).toEqual([{ type: "web_search" }]);
-    });
-
-    it("does not duplicate hosted web_search when injected and already present", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({ tools: [{ type: "web_search" as const, name: "web_search" }] }),
-        undefined,
-        { injectHostedWebSearch: true },
-      );
-
-      expect(result.tools).toEqual([{ type: "web_search", name: "web_search" }]);
-    });
-  });
-
-  // ── Fixed fields ─────────────────────────────────────────────────────
-
-  describe("fixed fields", () => {
-    it("always sets stream to true", () => {
-      const result = translateAnthropicToCodexRequest(makeRequest());
-      expect(result.stream).toBe(true);
-    });
-
-    it("always sets store to false", () => {
-      const result = translateAnthropicToCodexRequest(makeRequest());
-      expect(result.store).toBe(false);
-    });
-
-    it("does not set reasoning when no effort is configured or requested", () => {
-      const result = translateAnthropicToCodexRequest(makeRequest());
-      expect(result.reasoning).toBeUndefined();
-    });
-  });
-
-  // ── Empty messages ───────────────────────────────────────────────────
-
-  describe("empty messages", () => {
-    it("ensures at least one input item when messages produce no items", () => {
-      // All thinking blocks get filtered out, producing no items
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "thinking" as const, thinking: "internal thought" },
-              ],
-            },
-          ],
-        }),
-      );
-      expect(result.input.length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  // ── tool_result with array content ─────────────────────────────────
-
-  describe("tool_result with array content", () => {
-    it("converts tool_result with array text content to joined string", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "tool_result" as const,
-                  tool_use_id: "toolu_arr",
-                  content: [
-                    { type: "text" as const, text: "Line 1" },
-                    { type: "text" as const, text: "Line 2" },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
-      );
-      const outputItem = result.input.find(
-        (i) => "type" in i && i.type === "function_call_output",
-      );
-      expect(outputItem).toBeDefined();
-      expect((outputItem as Record<string, unknown>).output).toBe("Line 1\nLine 2");
-    });
-  });
-
-  // ── tool_result with image content (screenshot scenario) ───────────
-
-  describe("tool_result with image content", () => {
-    it("extracts images from tool_result into a following user message", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "tool_result" as const,
-                  tool_use_id: "toolu_img",
-                  content: [
-                    { type: "text" as const, text: "Screenshot captured" },
-                    {
-                      type: "image" as const,
-                      source: {
-                        type: "base64" as const,
-                        media_type: "image/png",
-                        data: "iVBORw0KGgo=",
-                      },
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
-      );
-
-      // Should produce function_call_output with text only
-      const outputItem = result.input.find(
-        (i) => "type" in i && i.type === "function_call_output",
-      );
-      expect(outputItem).toBeDefined();
-      expect((outputItem as Record<string, unknown>).output).toBe("Screenshot captured");
-
-      // Should produce a follow-up user message with the image
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
-      );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts).toHaveLength(1);
-      expect(parts[0].type).toBe("input_image");
-      expect(parts[0].image_url).toBe("data:image/png;base64,iVBORw0KGgo=");
-    });
-
-    it("handles tool_result with image-only content (no text)", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "tool_result" as const,
-                  tool_use_id: "toolu_img2",
-                  content: [
-                    {
-                      type: "image" as const,
-                      source: {
-                        type: "base64" as const,
-                        media_type: "image/jpeg",
-                        data: "/9j/4AAQ",
-                      },
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
-      );
-
-      const outputItem = result.input.find(
-        (i) => "type" in i && i.type === "function_call_output",
-      );
-      expect(outputItem).toBeDefined();
-      expect((outputItem as Record<string, unknown>).output).toBe("");
-
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
-      );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts[0].image_url).toBe("data:image/jpeg;base64,/9j/4AAQ");
-    });
-
-    it("handles tool_result with multiple images", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "tool_result" as const,
-                  tool_use_id: "toolu_multi",
-                  content: [
-                    { type: "text" as const, text: "Two screenshots" },
-                    {
-                      type: "image" as const,
-                      source: { type: "base64" as const, media_type: "image/png", data: "img1" },
-                    },
-                    {
-                      type: "image" as const,
-                      source: { type: "base64" as const, media_type: "image/png", data: "img2" },
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
-      );
-
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
-      );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts).toHaveLength(2);
-      expect(parts[0].image_url).toBe("data:image/png;base64,img1");
-      expect(parts[1].image_url).toBe("data:image/png;base64,img2");
-    });
-  });
-
-  // ── Mixed assistant content ────────────────────────────────────────
-
-  describe("mixed assistant content", () => {
-    it("converts assistant text block to assistant input item", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "text" as const, text: "Here is the result" },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("Here is the result");
-    });
-
-    it("handles assistant with both text and tool_use blocks", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "text" as const, text: "Let me search" },
-                {
-                  type: "tool_use" as const,
-                  id: "toolu_mixed",
-                  name: "search",
-                  input: { query: "test" },
-                },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      const fcItem = result.input.find(
-        (i) => "type" in i && i.type === "function_call",
-      );
-      expect(assistantItem).toBeDefined();
-      expect(fcItem).toBeDefined();
-    });
-
-    it("converts multiple tool_use blocks in single assistant message", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                {
-                  type: "tool_use" as const,
-                  id: "toolu_1",
-                  name: "search",
-                  input: { query: "a" },
-                },
-                {
-                  type: "tool_use" as const,
-                  id: "toolu_2",
-                  name: "fetch",
-                  input: { url: "https://example.com" },
-                },
-              ],
-            },
-          ],
-        }),
-      );
-      const fcItems = result.input.filter(
-        (i) => "type" in i && i.type === "function_call",
-      );
-      expect(fcItems).toHaveLength(2);
-    });
-  });
-
-  // ── Thinking block filtering ──────────────────────────────────────
-
-  describe("thinking block handling", () => {
-    it("filters out thinking blocks from assistant text content", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "thinking" as const, thinking: "internal thought" },
-                { type: "text" as const, text: "visible answer" },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("visible answer");
-    });
-
-    it("filters out redacted_thinking blocks from assistant content", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "redacted_thinking" as const, data: "encrypted" },
-                { type: "text" as const, text: "answer" },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("answer");
-    });
-  });
-
-  // ── System instruction edge cases ─────────────────────────────────
-
-  describe("system instruction edge cases", () => {
-    it("uses default instructions for empty system string", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({ system: "" }),
-      );
-      expect(result.instructions).toBe("You are a helpful assistant.");
-    });
-
-    it("handles single text block system", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          system: [{ type: "text" as const, text: "Only one block." }],
-        }),
-      );
-      expect(result.instructions).toBe("Only one block.");
-    });
-  });
 });

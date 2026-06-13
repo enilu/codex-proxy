@@ -76,7 +76,7 @@ const AnthropicContentSchema = z.union([
 ]);
 
 const AnthropicMessageSchema = z.object({
-  role: z.enum(["user", "assistant"]),
+  role: z.string().min(1),
   content: AnthropicContentSchema,
 });
 
@@ -144,6 +144,22 @@ export const AnthropicMessagesRequestSchema = z.object({
 
 export type AnthropicMessagesRequest = z.infer<
   typeof AnthropicMessagesRequestSchema
+>;
+
+export const AnthropicCountTokensRequestSchema = z.object({
+  model: z.string(),
+  messages: z.array(AnthropicMessageSchema).min(1),
+  system: z
+    .union([z.string(), z.array(AnthropicTextContentSchema)])
+    .optional(),
+  tools: AnthropicMessagesRequestSchema.shape.tools,
+  tool_choice: AnthropicMessagesRequestSchema.shape.tool_choice,
+  thinking: AnthropicMessagesRequestSchema.shape.thinking,
+  betas: z.array(z.string()).optional(),
+});
+
+export type AnthropicCountTokensRequest = z.infer<
+  typeof AnthropicCountTokensRequestSchema
 >;
 
 // --- Response ---

@@ -87,12 +87,42 @@ export type CodexContentPart =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string };
 
+export type CodexReasoningStatus = "in_progress" | "completed" | "incomplete";
+
+export interface CodexReasoningSummaryPart {
+  type: "summary_text";
+  text: string;
+}
+
+export interface CodexReasoningTextPart {
+  type: "reasoning_text";
+  text: string;
+}
+
+export interface CodexReasoningItem {
+  type: "reasoning";
+  id: string;
+  status?: CodexReasoningStatus;
+  encrypted_content?: string;
+  summary: CodexReasoningSummaryPart[];
+  content?: CodexReasoningTextPart[];
+}
+
+export interface CodexCompactionItem {
+  type: "compaction";
+  id?: string;
+  encrypted_content: string;
+}
+
 export type CodexInputItem =
   | { role: "user"; content: string | CodexContentPart[] }
   | { role: "assistant"; content: string }
   | { role: "system"; content: string }
+  | { role: "developer"; content: string }
   | { type: "function_call"; id?: string; call_id: string; name: string; arguments: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+  | { type: "function_call_output"; call_id: string; output: string }
+  | CodexReasoningItem
+  | CodexCompactionItem;
 
 /** Parsed SSE event from the Codex Responses stream */
 export interface CodexSSEEvent {
@@ -121,19 +151,50 @@ export interface CodexUsageAdditionalRateLimit {
   rate_limit: CodexUsageRateLimit | null;
 }
 
+/** Credit accounting block from /backend-api/codex/usage.
+ *  Populated for Pro / Pay-As-You-Go accounts; for Plus accounts the
+ *  block is present but has_credits=false and balance="0". */
+export interface CodexUsageCredits {
+  has_credits: boolean;
+  unlimited: boolean;
+  overage_limit_reached: boolean;
+  /** Decimal string. Upstream returns "0", "12.345", etc. */
+  balance: string;
+  /** Approximate remaining messages, tuple of [low, high]. */
+  approx_local_messages?: [number, number];
+  approx_cloud_messages?: [number, number];
+}
+
+/** Per-account spend control (if user set a hard limit). */
+export interface CodexUsageSpendControl {
+  reached: boolean;
+  individual_limit: number | string | null;
+}
+
+/** Diagnostic about which limit type was hit when limit_reached=true. */
+export interface CodexUsageRateLimitReachedType {
+  type: string;
+  details: string | null;
+}
+
 export interface CodexUsageResponse {
   plan_type: string;
   rate_limit: CodexUsageRateLimit;
   code_review_rate_limit: CodexUsageRateLimit | null;
   additional_rate_limits?: CodexUsageAdditionalRateLimit[] | null;
-  credits: unknown;
-  promo: unknown;
+  credits?: CodexUsageCredits | null;
+  spend_control?: CodexUsageSpendControl | null;
+  rate_limit_reached_type?: CodexUsageRateLimitReachedType | null;
+  promo?: unknown;
 }
 
 export class CodexApiError extends Error {
+  public readonly headers: Headers | undefined;
+
   constructor(
     public readonly status: number,
     public readonly body: string,
+    headers?: Headers,
   ) {
     let detail: string;
     try {
@@ -149,6 +210,7 @@ export class CodexApiError extends Error {
       detail = body;
     }
     super(`Codex API error (${status}): ${detail}`);
+    this.headers = headers ? new Headers(headers) : undefined;
   }
 }
 

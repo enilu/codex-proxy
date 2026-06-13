@@ -44,6 +44,30 @@ function normalizeModelAliases(input: unknown): {
 export function createSettingsRoutes(): Hono {
   const app = new Hono();
 
+  app.use("/admin/*", async (c, next) => {
+    const path = c.req.path;
+    // Error-log routes use dashboard session auth (dashboardAuth middleware).
+    // Only skip this Bearer-token gate for read-only GET requests; mutating
+    // operations (POST seen, DELETE) still need to pass through.
+    if (path.startsWith("/admin/error-logs") && c.req.method === "GET") {
+      return next();
+    }
+    if (c.req.method !== "POST" && c.req.method !== "PUT" && c.req.method !== "PATCH" && c.req.method !== "DELETE") {
+      return next();
+    }
+    const config = getConfig();
+    const currentKey = config.server.proxy_api_key;
+    if (currentKey) {
+      const authHeader = c.req.header("Authorization") ?? "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== currentKey) {
+        c.status(401);
+        return c.json({ error: "Invalid current API key" });
+      }
+    }
+    return next();
+  });
+
   // --- Rotation settings ---
 
   app.get("/admin/rotation-settings", (c) => {
@@ -54,18 +78,6 @@ export function createSettingsRoutes(): Hono {
   });
 
   app.post("/admin/rotation-settings", async (c) => {
-    const config = getConfig();
-    const currentKey = config.server.proxy_api_key;
-
-    if (currentKey) {
-      const authHeader = c.req.header("Authorization") ?? "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (token !== currentKey) {
-        c.status(401);
-        return c.json({ error: "Invalid current API key" });
-      }
-    }
-
     const body = await c.req.json() as { rotation_strategy?: string };
     const valid: readonly string[] = ROTATION_STRATEGIES;
     if (!body.rotation_strategy || !valid.includes(body.rotation_strategy)) {
@@ -96,16 +108,6 @@ export function createSettingsRoutes(): Hono {
   app.post("/admin/settings", async (c) => {
     const config = getConfig();
     const currentKey = config.server.proxy_api_key;
-
-    if (currentKey) {
-      const authHeader = c.req.header("Authorization") ?? "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (token !== currentKey) {
-        c.status(401);
-        return c.json({ error: "Invalid current API key" });
-      }
-    }
-
     const body = await c.req.json() as { proxy_api_key?: string | null };
     const newKey = body.proxy_api_key === undefined ? currentKey : (body.proxy_api_key || null);
 
@@ -154,22 +156,12 @@ export function createSettingsRoutes(): Hono {
       logs_capture_body: config.logs.capture_body,
       logs_llm_only: config.logs.llm_only,
       usage_history_retention_days: config.usage_stats.history_retention_days,
+      credits_per_usd: config.usage_stats.credits_per_usd,
     });
   });
 
   app.post("/admin/general-settings", async (c) => {
     const config = getConfig();
-    const currentKey = config.server.proxy_api_key;
-
-    if (currentKey) {
-      const authHeader = c.req.header("Authorization") ?? "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (token !== currentKey) {
-        c.status(401);
-        return c.json({ error: "Invalid current API key" });
-      }
-    }
-
     const body = await c.req.json() as {
       port?: number;
       proxy_enabled?: boolean;
@@ -193,6 +185,7 @@ export function createSettingsRoutes(): Hono {
       logs_capture_body?: boolean;
       logs_llm_only?: boolean;
       usage_history_retention_days?: number | null;
+      credits_per_usd?: number;
     };
 
     // --- validation ---
@@ -272,6 +265,13 @@ export function createSettingsRoutes(): Hono {
       if (!Number.isInteger(body.usage_history_retention_days) || body.usage_history_retention_days < 1) {
         c.status(400);
         return c.json({ error: "usage_history_retention_days must be an integer >= 1 or null" });
+      }
+    }
+
+    if (body.credits_per_usd !== undefined) {
+      if (!Number.isFinite(body.credits_per_usd) || body.credits_per_usd < 0) {
+        c.status(400);
+        return c.json({ error: "credits_per_usd must be a number >= 0" });
       }
     }
 
@@ -367,6 +367,10 @@ export function createSettingsRoutes(): Hono {
         if (!data.usage_stats) data.usage_stats = {};
         (data.usage_stats as Record<string, unknown>).history_retention_days = body.usage_history_retention_days;
       }
+      if (body.credits_per_usd !== undefined) {
+        if (!data.usage_stats) data.usage_stats = {};
+        (data.usage_stats as Record<string, unknown>).credits_per_usd = body.credits_per_usd;
+      }
     });
     reloadAllConfigs();
 
@@ -405,6 +409,7 @@ export function createSettingsRoutes(): Hono {
       logs_capture_body: updated.logs?.capture_body ?? false,
       logs_llm_only: updated.logs?.llm_only ?? true,
       usage_history_retention_days: updated.usage_stats.history_retention_days,
+      credits_per_usd: updated.usage_stats.credits_per_usd,
       restart_required: restartRequired,
     });
   });
@@ -421,18 +426,6 @@ export function createSettingsRoutes(): Hono {
   });
 
   app.post("/admin/quota-settings", async (c) => {
-    const config = getConfig();
-    const currentKey = config.server.proxy_api_key;
-
-    if (currentKey) {
-      const authHeader = c.req.header("Authorization") ?? "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (token !== currentKey) {
-        c.status(401);
-        return c.json({ error: "Invalid current API key" });
-      }
-    }
-
     const body = await c.req.json() as {
       refresh_interval_minutes?: number;
       warning_thresholds?: { primary?: number[]; secondary?: number[] };

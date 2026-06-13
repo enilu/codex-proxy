@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
 import type { AccountPool } from "../../auth/account-pool.js";
+import { clearCfChallengeCooldown } from "../../auth/cf-challenge-cooldown.js";
 import type { SessionAffinityMap } from "../../auth/session-affinity.js";
 import type { CodexApi } from "../../proxy/codex-api.js";
 import { recordStreamCloseEvent } from "../../logs/stream-close-event.js";
@@ -11,6 +12,7 @@ import { annotateImageGenOutcome } from "./proxy-handler-utils.js";
 import { streamResponse } from "./response-processor.js";
 import { createResponseMetadataCollector } from "./response-metadata-collector.js";
 import { logProxyUsage } from "./proxy-usage-log.js";
+import { getReasoningReplayCache } from "../../proxy/reasoning-replay-cache.js";
 
 export interface HandleStreamingOptions {
   c: Context;
@@ -52,16 +54,27 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
   c.header("Content-Type", "text/event-stream");
   c.header("Cache-Control", "no-cache");
   c.header("Connection", "keep-alive");
+  // Disable response buffering on nginx-class reverse proxies so SSE heartbeats
+  // and deltas reach the client immediately instead of being held back.
+  c.header("X-Accel-Buffering", "no");
 
   const capturedEntryId = entryId;
   const capturedApi = api;
   let usageInfo: UsageInfo | undefined;
   let capturedResponseId: string | null = null;
   let responseCompleted = false;
+  let streamCompletedWithoutError = false;
   const metadataCollector = createResponseMetadataCollector();
+  const reasoningReplayCache = getReasoningReplayCache();
 
   return stream(c, async (s) => {
+    let clientAborted = false;
+    let streamFailed = true;
     s.onAbort(() => {
+      if (streamCompletedWithoutError || responseCompleted) {
+        return;
+      }
+      clientAborted = true;
       console.warn(`[stream-client-abort] rid=${requestId.slice(0, 8)} tag=${fmt.tag} model=${req.model}`);
       recordStreamCloseEvent({
         kind: "client-abort",
@@ -82,11 +95,27 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
         capturedEntryId,
         conversationId,
         turnState,
-        req.codexRequest.instructions ?? undefined,
+        req.codexRequest.instructions,
         usageInfo?.input_tokens,
         Array.from(metadataCollector.responseFunctionCallIds),
         variantHash,
       );
+      if (!metadataCollector.invalidReasoningReplay && metadataCollector.reasoningReplayItems.length > 0) {
+        reasoningReplayCache.record({
+          responseId: capturedResponseId,
+          entryId: capturedEntryId,
+          conversationId,
+          variantHash,
+          items: metadataCollector.reasoningReplayItems,
+        });
+      }
+    };
+    const evictReasoningReplayIdentity = (): void => {
+      reasoningReplayCache.evictByIdentity({
+        entryId: capturedEntryId,
+        conversationId,
+        variantHash,
+      });
     };
     try {
       await streamResponse({
@@ -112,6 +141,9 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
         usageHint,
         onResponseMetadata: (metadata) => {
           metadataCollector.onResponseMetadata(metadata);
+          if (metadataCollector.invalidReasoningReplay) {
+            evictReasoningReplayIdentity();
+          }
           recordStreamAffinity();
         },
         diagnostics: {
@@ -124,9 +156,14 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
           abortSignal: abortController.signal,
         },
       });
+      streamFailed = false;
+      streamCompletedWithoutError = true;
     } finally {
-      abortController.abort();
+      if (streamFailed && !clientAborted && !abortController.signal.aborted) {
+        abortController.abort();
+      }
       recordStreamAffinity();
+      if (streamCompletedWithoutError) clearCfChallengeCooldown(capturedEntryId);
       if (usageInfo) {
         logProxyUsage({
           tag: fmt.tag,

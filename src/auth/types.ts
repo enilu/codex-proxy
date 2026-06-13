@@ -73,6 +73,7 @@ export interface AccountEntry {
   cachedQuota: CodexQuota | null;
   /** ISO timestamp of when cachedQuota was last updated. */
   quotaFetchedAt: string | null;
+  quotaVerifyRequired?: boolean;
 }
 
 /** Public info (no token) */
@@ -89,16 +90,27 @@ export interface AccountInfo {
   expiresAt: string | null;
   quota?: CodexQuota;
   quotaFetchedAt?: string | null;
+  quotaVerifyRequired?: boolean;
 }
 
 /** A single rate limit window (primary or secondary). */
 export interface CodexQuotaWindow {
   used_percent: number | null;
+  remaining_percent?: number | null;
   reset_at: number | null;
   limit_window_seconds: number | null;
 }
 
-/** Official Codex quota from /backend-api/codex/usage */
+/** Normalized credit accounting for an account. */
+export interface CodexQuotaCredits {
+  has_credits: boolean;
+  unlimited: boolean;
+  overage_limit_reached: boolean;
+  /** Numeric balance parsed from the upstream decimal-string field. */
+  balance: number;
+}
+
+/** Official Codex quota from /backend-api/wham/usage or /backend-api/codex/usage. */
 export interface CodexQuota {
   plan_type: string;
   rate_limit: CodexQuotaWindow & {
@@ -113,9 +125,12 @@ export interface CodexQuota {
     allowed: boolean;
     limit_reached: boolean;
     used_percent: number | null;
+    remaining_percent?: number | null;
     reset_at: number | null;
     limit_window_seconds: number | null;
   } | null;
+  /** Credit accounting (Pro / PAYG only — null for Plus). */
+  credits?: CodexQuotaCredits | null;
   /** All metered quota buckets returned by Codex app's /wham/usage additional_rate_limits. */
   rate_limits_by_limit_id?: Record<string, {
     limit_id: string;
@@ -123,6 +138,7 @@ export interface CodexQuota {
     allowed: boolean;
     limit_reached: boolean;
     used_percent: number | null;
+    remaining_percent?: number | null;
     reset_at: number | null;
     limit_window_seconds: number | null;
     secondary_rate_limit?: CodexQuotaWindow & {
