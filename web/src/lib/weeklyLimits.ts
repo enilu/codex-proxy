@@ -58,6 +58,37 @@ function displayLimitName(value: string | null | undefined, fallback: string): s
   return raw ? raw.replace(/_/g, " ") : fallback;
 }
 
+function sameWeeklyReset(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return a === b;
+  return Math.abs(a - b) <= WEEK_TOLERANCE_SECONDS;
+}
+
+function fetchedAtMs(value: string | null): number {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function dedupeWeeklyRows(rows: WeeklyLimitRow[]): WeeklyLimitRow[] {
+  const deduped: WeeklyLimitRow[] = [];
+  for (const row of rows) {
+    const existingIndex = deduped.findIndex((item) =>
+      item.accountId === row.accountId &&
+      item.limitId === row.limitId &&
+      sameWeeklyReset(item.resetAt, row.resetAt)
+    );
+    if (existingIndex < 0) {
+      deduped.push(row);
+      continue;
+    }
+    const existing = deduped[existingIndex];
+    if (fetchedAtMs(row.quotaFetchedAt) >= fetchedAtMs(existing.quotaFetchedAt)) {
+      deduped[existingIndex] = row;
+    }
+  }
+  return deduped;
+}
+
 export function extractWeeklyLimits(accounts: Account[]): WeeklyLimitRow[] {
   const rows: WeeklyLimitRow[] = [];
 
@@ -127,7 +158,7 @@ export function extractWeeklyLimits(accounts: Account[]): WeeklyLimitRow[] {
     }
   }
 
-  return rows.sort((a, b) => {
+  return dedupeWeeklyRows(rows).sort((a, b) => {
     const stateRank = (state: WeeklyLimitState) =>
       state === "exhausted" ? 0 : state === "unknown" ? 1 : 2;
     const stateDiff = stateRank(a.state) - stateRank(b.state);

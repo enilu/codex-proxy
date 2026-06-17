@@ -161,4 +161,63 @@ describe("extractWeeklyLimits", () => {
     expect(rows.map((row) => row.snapshotKey)).toEqual(["secondary:2000", "secondary:1000"]);
     expect(rows.map((row) => row.state)).toEqual(["exhausted", "available"]);
   });
+
+  it("deduplicates historical weekly snapshots when reset_at drifts within tolerance", () => {
+    const rows = extractWeeklyLimits([
+      account({
+        quotaHistory: [
+          {
+            key: "secondary:1000",
+            fetchedAt: "2026-06-01T00:00:00.000Z",
+            quota: {
+              plan_type: "plus",
+              rate_limit: {
+                limit_reached: false,
+                used_percent: 10,
+                reset_at: 500,
+                limit_window_seconds: 300,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 67,
+                remaining_percent: 33,
+                reset_at: 1000,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+          {
+            key: "secondary:1001",
+            fetchedAt: "2026-06-01T00:05:00.000Z",
+            quota: {
+              plan_type: "plus",
+              rate_limit: {
+                limit_reached: false,
+                used_percent: 10,
+                reset_at: 500,
+                limit_window_seconds: 300,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 68,
+                remaining_percent: 32,
+                reset_at: 1001,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+        ],
+      }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      snapshotKey: "secondary:1001",
+      usedPercent: 68,
+      remainingPercent: 32,
+      resetAt: 1001,
+    });
+  });
 });

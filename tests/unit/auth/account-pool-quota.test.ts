@@ -152,6 +152,19 @@ describe("AccountPool quota methods", () => {
       expect(info?.quotaHistory).toHaveLength(2);
     });
 
+    it("deduplicates weekly quota history when reset_at drifts within tolerance", () => {
+      const id = pool.addAccount(createValidJwt({ accountId: "weekly-history-drift", planType: "plus" }));
+      const firstReset = Math.floor(Date.now() / 1000) + 604800;
+
+      pool.updateCachedQuota(id, makeWeeklyQuota(firstReset, 67));
+      pool.updateCachedQuota(id, makeWeeklyQuota(firstReset + 1, 68));
+
+      const history = pool.getEntry(id)?.quotaHistory ?? [];
+      expect(history).toHaveLength(1);
+      expect(history[0].quota.secondary_rate_limit?.used_percent).toBe(68);
+      expect(history[0].quota.secondary_rate_limit?.reset_at).toBe(firstReset + 1);
+    });
+
     it("keeps only the latest 7 weekly quota history snapshots", () => {
       const id = pool.addAccount(createValidJwt({ accountId: "weekly-history-cap", planType: "plus" }));
       const firstReset = Math.floor(Date.now() / 1000) + 604800;

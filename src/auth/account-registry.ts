@@ -43,6 +43,12 @@ const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const WEEK_TOLERANCE_SECONDS = 60;
 const MAX_QUOTA_HISTORY = 7;
 
+interface WeeklyQuotaSnapshotPart {
+  id: string;
+  resetAt: number | null;
+  limitWindowSeconds: number | null | undefined;
+}
+
 function nextResetAt(resetAt: number, windowSec: number | null | undefined, nowSec: number): number | null {
   if (windowSec == null || windowSec <= 0) return null;
   const elapsedWindows = Math.floor((nowSec - resetAt) / windowSec) + 1;
@@ -56,11 +62,15 @@ function isWeeklyQuotaWindow(window: CodexQuotaWindow | null | undefined): boole
     Math.abs(seconds - WEEK_SECONDS) <= WEEK_TOLERANCE_SECONDS;
 }
 
-function weeklyQuotaSnapshotKey(quota: CodexQuota): string | null {
-  const parts: string[] = [];
+function weeklyQuotaSnapshotParts(quota: CodexQuota): WeeklyQuotaSnapshotPart[] {
+  const parts: WeeklyQuotaSnapshotPart[] = [];
   const add = (id: string, window: CodexQuotaWindow | null | undefined) => {
     if (!isWeeklyQuotaWindow(window)) return;
-    parts.push(`${id}:${window?.reset_at ?? "none"}:${window?.limit_window_seconds ?? "none"}`);
+    parts.push({
+      id,
+      resetAt: window?.reset_at ?? null,
+      limitWindowSeconds: window?.limit_window_seconds,
+    });
   };
 
   add("primary", quota.rate_limit);
@@ -72,21 +82,50 @@ function weeklyQuotaSnapshotKey(quota: CodexQuota): string | null {
     add(`additional:${limitId}:secondary`, bucket.secondary_rate_limit);
   }
 
+  return parts.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function canonicalWeeklyResetAt(resetAt: number | null): string {
+  if (resetAt == null) return "none";
+  return String(Math.floor(resetAt / WEEK_TOLERANCE_SECONDS));
+}
+
+function weeklyQuotaSnapshotKey(quota: CodexQuota): string | null {
+  const parts = weeklyQuotaSnapshotParts(quota);
   if (parts.length === 0) return null;
-  return parts.sort().join("|");
+  return parts
+    .map((part) =>
+      `${part.id}:${canonicalWeeklyResetAt(part.resetAt)}:${part.limitWindowSeconds ?? "none"}`
+    )
+    .join("|");
+}
+
+function sameWeeklyResetWindow(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return a === b;
+  return Math.abs(a - b) <= WEEK_TOLERANCE_SECONDS;
+}
+
+function isSameWeeklyQuotaSnapshot(a: CodexQuotaSnapshot, b: CodexQuotaSnapshot): boolean {
+  if (a.key === b.key) return true;
+  const aParts = weeklyQuotaSnapshotParts(a.quota);
+  const bParts = weeklyQuotaSnapshotParts(b.quota);
+  if (aParts.length === 0 || aParts.length !== bParts.length) return false;
+  for (let i = 0; i < aParts.length; i++) {
+    const left = aParts[i];
+    const right = bParts[i];
+    if (left.id !== right.id) return false;
+    if (left.limitWindowSeconds !== right.limitWindowSeconds) return false;
+    if (!sameWeeklyResetWindow(left.resetAt, right.resetAt)) return false;
+  }
+  return true;
 }
 
 function appendQuotaHistory(
   history: CodexQuotaSnapshot[] | undefined,
   snapshot: CodexQuotaSnapshot,
 ): CodexQuotaSnapshot[] {
-  const next = [...(history ?? [])];
-  const existingIndex = next.findIndex((item) => item.key === snapshot.key);
-  if (existingIndex >= 0) {
-    next[existingIndex] = snapshot;
-  } else {
-    next.push(snapshot);
-  }
+  const next = (history ?? []).filter((item) => !isSameWeeklyQuotaSnapshot(item, snapshot));
+  next.push(snapshot);
   return next.slice(-MAX_QUOTA_HISTORY);
 }
 
