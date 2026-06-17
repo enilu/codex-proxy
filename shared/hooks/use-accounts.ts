@@ -13,6 +13,26 @@ export interface PersistenceHealth {
   message?: string;
 }
 
+async function readJsonOrEmpty(resp: Response): Promise<Record<string, unknown>> {
+  const text = await resp.text();
+  if (!text.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function responseError(resp: Response, data: Record<string, unknown>, fallback: string): string {
+  const detail = typeof data.error === "string"
+    ? data.error
+    : typeof data.detail === "string"
+      ? data.detail
+      : null;
+  return detail || `${fallback} (HTTP ${resp.status})`;
+}
+
 export function useAccounts() {
   const [list, setList] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,8 +48,8 @@ export function useAccounts() {
     setRefreshing(true);
     try {
       const resp = await fetch("/auth/accounts?quota=true");
-      const data = await resp.json();
-      setList(data.accounts || []);
+      const data = await readJsonOrEmpty(resp);
+      setList(Array.isArray(data.accounts) ? data.accounts as Account[] : []);
       if (data.persistence_health && typeof data.persistence_health === "object") {
         setPersistenceHealth(data.persistence_health as PersistenceHealth);
       }
@@ -70,17 +90,17 @@ export function useAccounts() {
     setAddError("");
     try {
       const resp = await fetch("/auth/login-start", { method: "POST" });
-      const data = await resp.json();
-      if (!resp.ok || !data.authUrl) {
-        throw new Error(data.error || "failedStartLogin");
+      const data = await readJsonOrEmpty(resp);
+      if (!resp.ok || typeof data.authUrl !== "string") {
+        throw new Error(responseError(resp, data, "failedStartLogin"));
       }
       window.open(data.authUrl, "oauth_add", "width=600,height=700,scrollbars=yes");
       setAddVisible(true);
 
       // Poll for new account + focus/visibility detection
       const prevResp = await fetch("/auth/accounts");
-      const prevData = await prevResp.json();
-      const prevCount = prevData.accounts?.length || 0;
+      const prevData = await readJsonOrEmpty(prevResp);
+      const prevCount = Array.isArray(prevData.accounts) ? prevData.accounts.length : 0;
 
       let checking = false;
       const checkForNewAccount = async () => {
@@ -88,8 +108,9 @@ export function useAccounts() {
         checking = true;
         try {
           const r = await fetch("/auth/accounts");
-          const d = await r.json();
-          if ((d.accounts?.length || 0) > prevCount) {
+          const d = await readJsonOrEmpty(r);
+          const accountCount = Array.isArray(d.accounts) ? d.accounts.length : 0;
+          if (accountCount > prevCount) {
             cleanup();
             setAddVisible(false);
             setAddInfo("accountAdded");
