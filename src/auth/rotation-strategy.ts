@@ -4,6 +4,10 @@
  */
 
 import type { AccountEntry } from "./types.js";
+import {
+  compareQuotaWindowPriority,
+  hasAnyReachedCachedQuota,
+} from "./quota-window-priority.js";
 
 export type RotationStrategyName = "least_used" | "round_robin" | "sticky";
 
@@ -19,16 +23,13 @@ const leastUsed: RotationStrategy = {
   select(candidates, state) {
     const cmp = (a: AccountEntry, b: AccountEntry): number => {
       // Primary: deprioritize quota-exhausted accounts
-      const aExhausted = a.cachedQuota?.rate_limit?.limit_reached ? 1 : 0;
-      const bExhausted = b.cachedQuota?.rate_limit?.limit_reached ? 1 : 0;
+      const aExhausted = hasAnyReachedCachedQuota(a) ? 1 : 0;
+      const bExhausted = hasAnyReachedCachedQuota(b) ? 1 : 0;
       if (aExhausted !== bExhausted) return aExhausted - bExhausted;
-      // Secondary: prefer account whose quota resets soonest (use it before it resets).
-      // Only compare when both have a known window — an account without window_reset_at
-      // (e.g. brand new, never received rate-limit headers) must not be permanently
-      // deprioritized behind one that has.  Fall through to request_count instead.
-      const aReset = a.usage.window_reset_at;
-      const bReset = b.usage.window_reset_at;
-      if (aReset != null && bReset != null && aReset !== bReset) return aReset - bReset;
+      // Secondary: prefer accounts whose quota windows reset soonest. Longer-lived
+      // windows are compared first so weekly quota is used before it refreshes.
+      const quotaWindowDiff = compareQuotaWindowPriority(a, b);
+      if (quotaWindowDiff !== 0) return quotaWindowDiff;
       // Tertiary: fewer requests = more remaining quota
       const diff = a.usage.request_count - b.usage.request_count;
       if (diff !== 0) return diff;
