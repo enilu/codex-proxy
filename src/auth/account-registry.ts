@@ -19,6 +19,8 @@ import type {
   AccountEntry,
   AccountInfo,
   CodexQuota,
+  CodexQuotaSnapshot,
+  CodexQuotaWindow,
 } from "./types.js";
 import { hasReachedCachedQuota } from "./quota-skip.js";
 import { isCfChallengeCooldownActive } from "./cf-challenge-cooldown.js";
@@ -37,10 +39,55 @@ type ResettableQuotaWindow = {
   limit_reached: boolean;
 };
 
+const WEEK_SECONDS = 7 * 24 * 60 * 60;
+const WEEK_TOLERANCE_SECONDS = 60;
+const MAX_QUOTA_HISTORY = 7;
+
 function nextResetAt(resetAt: number, windowSec: number | null | undefined, nowSec: number): number | null {
   if (windowSec == null || windowSec <= 0) return null;
   const elapsedWindows = Math.floor((nowSec - resetAt) / windowSec) + 1;
   return resetAt + elapsedWindows * windowSec;
+}
+
+function isWeeklyQuotaWindow(window: CodexQuotaWindow | null | undefined): boolean {
+  const seconds = window?.limit_window_seconds;
+  return typeof seconds === "number" &&
+    Number.isFinite(seconds) &&
+    Math.abs(seconds - WEEK_SECONDS) <= WEEK_TOLERANCE_SECONDS;
+}
+
+function weeklyQuotaSnapshotKey(quota: CodexQuota): string | null {
+  const parts: string[] = [];
+  const add = (id: string, window: CodexQuotaWindow | null | undefined) => {
+    if (!isWeeklyQuotaWindow(window)) return;
+    parts.push(`${id}:${window?.reset_at ?? "none"}:${window?.limit_window_seconds ?? "none"}`);
+  };
+
+  add("primary", quota.rate_limit);
+  add("secondary", quota.secondary_rate_limit);
+  add("code_review", quota.code_review_rate_limit);
+  for (const bucket of Object.values(quota.rate_limits_by_limit_id ?? {})) {
+    const limitId = bucket.limit_id || "additional";
+    add(`additional:${limitId}`, bucket);
+    add(`additional:${limitId}:secondary`, bucket.secondary_rate_limit);
+  }
+
+  if (parts.length === 0) return null;
+  return parts.sort().join("|");
+}
+
+function appendQuotaHistory(
+  history: CodexQuotaSnapshot[] | undefined,
+  snapshot: CodexQuotaSnapshot,
+): CodexQuotaSnapshot[] {
+  const next = [...(history ?? [])];
+  const existingIndex = next.findIndex((item) => item.key === snapshot.key);
+  if (existingIndex >= 0) {
+    next[existingIndex] = snapshot;
+  } else {
+    next.push(snapshot);
+  }
+  return next.slice(-MAX_QUOTA_HISTORY);
 }
 
 function resetExpiredQuotaWindow(
@@ -479,12 +526,20 @@ export class AccountRegistry {
     // The passive header-driven path (rateLimitToQuota in proxy-rate-limit.ts)
     // does not carry credit balance — only /codex/usage body (toQuota) does.
     // Without this merge, every /codex/responses call would wipe credits.
-    if (quota.credits == null && entry.cachedQuota?.credits != null) {
-      entry.cachedQuota = { ...quota, credits: entry.cachedQuota.credits };
-    } else {
-      entry.cachedQuota = quota;
+    const nextQuota = quota.credits == null && entry.cachedQuota?.credits != null
+      ? { ...quota, credits: entry.cachedQuota.credits }
+      : quota;
+    entry.cachedQuota = nextQuota;
+    const fetchedAt = new Date().toISOString();
+    entry.quotaFetchedAt = fetchedAt;
+    const historyKey = weeklyQuotaSnapshotKey(nextQuota);
+    if (historyKey) {
+      entry.quotaHistory = appendQuotaHistory(entry.quotaHistory, {
+        key: historyKey,
+        fetchedAt,
+        quota: nextQuota,
+      });
     }
-    entry.quotaFetchedAt = new Date().toISOString();
     entry.quotaVerifyRequired = false; // Reset the dirty flag on fresh update
     this.schedulePersist();
   }
@@ -604,6 +659,9 @@ export class AccountRegistry {
     if (entry.cachedQuota) {
       info.quota = entry.cachedQuota;
       info.quotaFetchedAt = entry.quotaFetchedAt;
+      if (entry.quotaHistory?.length) {
+        info.quotaHistory = entry.quotaHistory;
+      }
       if (entry.quotaVerifyRequired) {
         info.quotaVerifyRequired = entry.quotaVerifyRequired;
       }

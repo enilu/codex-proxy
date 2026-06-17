@@ -160,7 +160,7 @@ export function WeeklyLimitsPage({ embedded }: { embedded?: boolean } = {}) {
                 const reset = row.resetAt ? formatResetTime(row.resetAt, lang === "zh") : "—";
                 return (
                   <div
-                    key={`${row.accountId}:${row.limitId}`}
+                    key={`${row.accountId}:${row.snapshotKey ?? row.quotaFetchedAt ?? "current"}:${row.limitId}`}
                     class="grid grid-cols-[minmax(180px,1.5fr)_minmax(120px,1fr)_96px_96px_120px_120px_80px] gap-3 px-4 py-3 border-b border-gray-50 dark:border-border-dark/50 text-sm items-center"
                   >
                     <div class="min-w-0">

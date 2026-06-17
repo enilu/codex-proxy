@@ -18,6 +18,7 @@ export interface WeeklyLimitRow {
   limitReached: boolean | null;
   resetAt: number | null;
   quotaFetchedAt: string | null;
+  snapshotKey: string | null;
   state: WeeklyLimitState;
 }
 
@@ -61,57 +62,68 @@ export function extractWeeklyLimits(accounts: Account[]): WeeklyLimitRow[] {
   const rows: WeeklyLimitRow[] = [];
 
   for (const account of accounts) {
-    const quota = account.quota;
-    if (!quota) continue;
+    const snapshots = account.quotaHistory?.length
+      ? account.quotaHistory.map((snapshot) => ({
+        quota: snapshot.quota,
+        fetchedAt: snapshot.fetchedAt,
+        key: snapshot.key,
+      }))
+      : account.quota
+        ? [{ quota: account.quota, fetchedAt: account.quotaFetchedAt ?? null, key: null }]
+        : [];
 
-    const candidates: LimitCandidate[] = [
-      { id: "primary", name: "Primary", window: quota.rate_limit },
-      { id: "secondary", name: "Weekly", window: quota.secondary_rate_limit },
-      {
-        id: "code_review",
-        name: "Code review",
-        window: quota.code_review_rate_limit,
-        allowed: quota.code_review_rate_limit?.allowed,
-      },
-    ];
+    for (const snapshot of snapshots) {
+      const quota = snapshot.quota;
+      const candidates: LimitCandidate[] = [
+        { id: "primary", name: "Primary", window: quota.rate_limit },
+        { id: "secondary", name: "Weekly", window: quota.secondary_rate_limit },
+        {
+          id: "code_review",
+          name: "Code review",
+          window: quota.code_review_rate_limit,
+          allowed: quota.code_review_rate_limit?.allowed,
+        },
+      ];
 
-    for (const bucket of Object.values(quota.rate_limits_by_limit_id ?? {})) {
-      const limitId = bucket.limit_id || "additional";
-      const limitName = displayLimitName(bucket.limit_name || bucket.limit_id, limitId);
-      candidates.push({
-        id: `additional:${limitId}`,
-        name: limitName,
-        window: bucket,
-        allowed: bucket.allowed,
-      });
-      candidates.push({
-        id: `additional:${limitId}:secondary`,
-        name: `${limitName} weekly`,
-        window: bucket.secondary_rate_limit,
-      });
-    }
+      for (const bucket of Object.values(quota.rate_limits_by_limit_id ?? {})) {
+        const limitId = bucket.limit_id || "additional";
+        const limitName = displayLimitName(bucket.limit_name || bucket.limit_id, limitId);
+        candidates.push({
+          id: `additional:${limitId}`,
+          name: limitName,
+          window: bucket,
+          allowed: bucket.allowed,
+        });
+        candidates.push({
+          id: `additional:${limitId}:secondary`,
+          name: `${limitName} weekly`,
+          window: bucket.secondary_rate_limit,
+        });
+      }
 
-    const seen = new Set<string>();
-    for (const candidate of candidates) {
-      if (!isWeeklyWindow(candidate.window) || seen.has(candidate.id)) continue;
-      seen.add(candidate.id);
-      const usedPercent = percent(candidate.window?.used_percent);
-      const remainingPercent = percent(candidate.window?.remaining_percent);
-      rows.push({
-        accountId: account.id,
-        email: account.email,
-        label: account.label,
-        planType: account.planType,
-        accountStatus: account.status,
-        limitId: candidate.id,
-        limitName: candidate.name,
-        usedPercent,
-        remainingPercent,
-        limitReached: candidate.window?.limit_reached ?? null,
-        resetAt: candidate.window?.reset_at ?? null,
-        quotaFetchedAt: account.quotaFetchedAt ?? null,
-        state: deriveState(candidate.window, candidate.allowed),
-      });
+      const seen = new Set<string>();
+      for (const candidate of candidates) {
+        if (!isWeeklyWindow(candidate.window) || seen.has(candidate.id)) continue;
+        seen.add(candidate.id);
+        const usedPercent = percent(candidate.window?.used_percent);
+        const remainingPercent = percent(candidate.window?.remaining_percent);
+        rows.push({
+          accountId: account.id,
+          email: account.email,
+          label: account.label,
+          planType: account.planType,
+          accountStatus: account.status,
+          limitId: candidate.id,
+          limitName: candidate.name,
+          usedPercent,
+          remainingPercent,
+          limitReached: candidate.window?.limit_reached ?? null,
+          resetAt: candidate.window?.reset_at ?? null,
+          quotaFetchedAt: snapshot.fetchedAt,
+          snapshotKey: snapshot.key,
+          state: deriveState(candidate.window, candidate.allowed),
+        });
+      }
     }
   }
 

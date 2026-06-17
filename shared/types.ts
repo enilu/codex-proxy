@@ -29,6 +29,12 @@ export interface AccountQuota {
   credits?: AccountQuotaCredits | null;
 }
 
+export interface AccountQuotaSnapshot {
+  key: string;
+  fetchedAt: string;
+  quota: AccountQuota;
+}
+
 export interface QuotaWarning {
   accountId: string;
   email: string | null;
@@ -64,6 +70,7 @@ export interface Account {
   };
   quota?: AccountQuota;
   quotaFetchedAt?: string | null;
+  quotaHistory?: AccountQuotaSnapshot[];
   proxyId?: string;
   proxyName?: string;
 }

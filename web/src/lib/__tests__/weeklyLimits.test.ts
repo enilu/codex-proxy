@@ -106,4 +106,59 @@ describe("extractWeeklyLimits", () => {
 
     expect(rows).toEqual([]);
   });
+
+  it("extracts multiple historical weekly snapshots for the same account", () => {
+    const rows = extractWeeklyLimits([
+      account({
+        quotaHistory: [
+          {
+            key: "secondary:1000",
+            fetchedAt: "2026-06-01T00:00:00.000Z",
+            quota: {
+              plan_type: "plus",
+              rate_limit: {
+                limit_reached: false,
+                used_percent: 10,
+                reset_at: 500,
+                limit_window_seconds: 300,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 45,
+                remaining_percent: 55,
+                reset_at: 1000,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+          {
+            key: "secondary:2000",
+            fetchedAt: "2026-06-08T00:00:00.000Z",
+            quota: {
+              plan_type: "plus",
+              rate_limit: {
+                limit_reached: false,
+                used_percent: 10,
+                reset_at: 500,
+                limit_window_seconds: 300,
+              },
+              secondary_rate_limit: {
+                limit_reached: true,
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: 2000,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+        ],
+      }),
+    ]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.snapshotKey)).toEqual(["secondary:2000", "secondary:1000"]);
+    expect(rows.map((row) => row.state)).toEqual(["exhausted", "available"]);
+  });
 });

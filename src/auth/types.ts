@@ -73,6 +73,8 @@ export interface AccountEntry {
   cachedQuota: CodexQuota | null;
   /** ISO timestamp of when cachedQuota was last updated. */
   quotaFetchedAt: string | null;
+  /** Latest quota snapshots grouped by weekly quota window signature, newest last. */
+  quotaHistory?: CodexQuotaSnapshot[];
   quotaVerifyRequired?: boolean;
 }
 
@@ -90,6 +92,7 @@ export interface AccountInfo {
   expiresAt: string | null;
   quota?: CodexQuota;
   quotaFetchedAt?: string | null;
+  quotaHistory?: CodexQuotaSnapshot[];
   quotaVerifyRequired?: boolean;
 }
 
@@ -145,6 +148,14 @@ export interface CodexQuota {
       limit_reached: boolean;
     } | null;
   }> | null;
+}
+
+export interface CodexQuotaSnapshot {
+  /** Stable key derived from reported weekly quota windows. */
+  key: string;
+  /** ISO timestamp of when this quota snapshot was collected. */
+  fetchedAt: string;
+  quota: CodexQuota;
 }
 
 /** Returned by acquire() */

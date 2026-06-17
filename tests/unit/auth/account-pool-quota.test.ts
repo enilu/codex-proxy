@@ -30,6 +30,18 @@ function makeQuota(overrides?: Partial<CodexQuota>): CodexQuota {
   };
 }
 
+function makeWeeklyQuota(resetAt: number, usedPercent: number, limitReached = false): CodexQuota {
+  return makeQuota({
+    secondary_rate_limit: {
+      limit_reached: limitReached,
+      used_percent: usedPercent,
+      remaining_percent: Math.max(0, 100 - usedPercent),
+      reset_at: resetAt,
+      limit_window_seconds: 7 * 24 * 60 * 60,
+    },
+  });
+}
+
 describe("AccountPool quota methods", () => {
   let pool: AccountPool;
 
@@ -121,6 +133,37 @@ describe("AccountPool quota methods", () => {
       }));
       const entry = pool.getEntry(id);
       expect(entry?.cachedQuota?.credits?.balance).toBe(42);
+    });
+
+    it("stores one quota history snapshot per weekly window signature", () => {
+      const id = pool.addAccount(createValidJwt({ accountId: "weekly-history", planType: "plus" }));
+      const firstReset = Math.floor(Date.now() / 1000) + 604800;
+
+      pool.updateCachedQuota(id, makeWeeklyQuota(firstReset, 25));
+      pool.updateCachedQuota(id, makeWeeklyQuota(firstReset, 80));
+      pool.updateCachedQuota(id, makeWeeklyQuota(firstReset + 604800, 100, true));
+
+      const entry = pool.getEntry(id);
+      expect(entry?.quotaHistory).toHaveLength(2);
+      expect(entry?.quotaHistory?.[0].quota.secondary_rate_limit?.used_percent).toBe(80);
+      expect(entry?.quotaHistory?.[1].quota.secondary_rate_limit?.limit_reached).toBe(true);
+
+      const info = pool.getAccounts().find((acct) => acct.id === id);
+      expect(info?.quotaHistory).toHaveLength(2);
+    });
+
+    it("keeps only the latest 7 weekly quota history snapshots", () => {
+      const id = pool.addAccount(createValidJwt({ accountId: "weekly-history-cap", planType: "plus" }));
+      const firstReset = Math.floor(Date.now() / 1000) + 604800;
+
+      for (let i = 0; i < 9; i++) {
+        pool.updateCachedQuota(id, makeWeeklyQuota(firstReset + i * 604800, i));
+      }
+
+      const history = pool.getEntry(id)?.quotaHistory ?? [];
+      expect(history).toHaveLength(7);
+      expect(history[0].quota.secondary_rate_limit?.used_percent).toBe(2);
+      expect(history[6].quota.secondary_rate_limit?.used_percent).toBe(8);
     });
   });
 
