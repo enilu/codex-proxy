@@ -66,6 +66,50 @@ describe("rotation-strategy", () => {
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
+    it("prefers earlier secondary reset before primary reset", () => {
+      const now = Date.now();
+      const a = makeEntry(
+        "primary-sooner",
+        { request_count: 0, window_reset_at: Math.floor((now + 1 * 3600_000) / 1000) },
+        {
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            used_percent: 20,
+            reset_at: Math.floor((now + 1 * 3600_000) / 1000),
+            limit_window_seconds: 18_000,
+          },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            reset_at: Math.floor((now + 5 * 86400_000) / 1000),
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const b = makeEntry(
+        "weekly-sooner",
+        { request_count: 20, window_reset_at: Math.floor((now + 4 * 3600_000) / 1000) },
+        {
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            used_percent: 20,
+            reset_at: Math.floor((now + 4 * 3600_000) / 1000),
+            limit_window_seconds: 18_000,
+          },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            reset_at: Math.floor((now + 1 * 86400_000) / 1000),
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+
+      expect(strategy.select([a, b], state).id).toBe("weekly-sooner");
+    });
+
     it("does not penalize new accounts without window_reset_at — falls through to request_count", () => {
       // Account A is brand-new (no window info yet), account B has a known window.
       // A has fewer requests so it should win: null window must not count as Infinity.
@@ -104,6 +148,36 @@ describe("rotation-strategy", () => {
         "healthy",
         { request_count: 5, window_reset_at: Date.now() + 7 * 86400_000 },
         { rate_limit: { allowed: true, limit_reached: false, used_percent: 30, reset_at: null, limit_window_seconds: null } },
+      );
+      expect(strategy.select([exhausted, healthy], state).id).toBe("healthy");
+    });
+
+    it("deprioritizes secondary-exhausted accounts even with earlier reset", () => {
+      const exhausted = makeEntry(
+        "secondary-exhausted",
+        { request_count: 0, window_reset_at: Date.now() + 1 * 86400_000 },
+        {
+          rate_limit: { allowed: true, limit_reached: false, used_percent: 10, reset_at: null, limit_window_seconds: null },
+          secondary_rate_limit: {
+            limit_reached: true,
+            used_percent: 100,
+            reset_at: Math.floor(Date.now() / 1000) + 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const healthy = makeEntry(
+        "healthy",
+        { request_count: 5, window_reset_at: Date.now() + 7 * 86400_000 },
+        {
+          rate_limit: { allowed: true, limit_reached: false, used_percent: 30, reset_at: null, limit_window_seconds: null },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 30,
+            reset_at: Math.floor(Date.now() / 1000) + 7 * 86400,
+            limit_window_seconds: 604_800,
+          },
+        },
       );
       expect(strategy.select([exhausted, healthy], state).id).toBe("healthy");
     });
