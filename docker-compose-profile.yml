@@ -1,0 +1,26 @@
+services:
+  codex-proxy-profile:
+    build: .
+    container_name: codex-proxy-profile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "36080:8080"
+      - "1455:1455"
+    volumes:
+      - ./database/data:/app/data
+      - ./database/config:/app/config
+    restart: always
+    env_file:
+      - ./database/env.production
+    environment:
+      TZ: Asia/Shanghai
+      NODE_ENV: production
+      PORT: 8080
+      CODEX_PROXY_HOST: 0.0.0.0
+    networks:
+      - wk
+
+networks:
+  wk:
+    external: true
