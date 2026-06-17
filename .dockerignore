@@ -12,3 +12,4 @@ stitch-*/
 .env.*
 scripts/poc-*
 .docker-build-time
+database/
