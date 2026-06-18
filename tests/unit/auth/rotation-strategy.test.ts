@@ -59,55 +59,145 @@ describe("rotation-strategy", () => {
     const strategy = getRotationStrategy("least_used");
     const state: RotationState = { roundRobinIndex: 0 };
 
-    it("prefers account with earliest window_reset_at (use-before-refresh)", () => {
-      // B resets in 1 day, A resets in 7 days — should pick B even though A has fewer requests
-      const a = makeEntry("a", { request_count: 2, window_reset_at: Date.now() + 7 * 86400_000 });
-      const b = makeEntry("b", { request_count: 8, window_reset_at: Date.now() + 1 * 86400_000 });
-      expect(strategy.select([a, b], state).id).toBe("b");
-    });
-
-    it("prefers earlier secondary reset before primary reset", () => {
-      const now = Date.now();
+    it("prefers account with secondary quota in an earlier expiry bucket", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
       const a = makeEntry(
-        "primary-sooner",
-        { request_count: 0, window_reset_at: Math.floor((now + 1 * 3600_000) / 1000) },
+        "later-weekly",
+        { request_count: 2 },
         {
-          rate_limit: {
-            allowed: true,
-            limit_reached: false,
-            used_percent: 20,
-            reset_at: Math.floor((now + 1 * 3600_000) / 1000),
-            limit_window_seconds: 18_000,
-          },
           secondary_rate_limit: {
             limit_reached: false,
             used_percent: 40,
-            reset_at: Math.floor((now + 5 * 86400_000) / 1000),
+            remaining_percent: 60,
+            reset_at: nowSec + 7 * 86400,
             limit_window_seconds: 604_800,
           },
         },
       );
       const b = makeEntry(
-        "weekly-sooner",
-        { request_count: 20, window_reset_at: Math.floor((now + 4 * 3600_000) / 1000) },
+        "soon-weekly",
+        { request_count: 8 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 6 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      expect(strategy.select([a, b], state).id).toBe("soon-weekly");
+    });
+
+    it("protects high primary usage before secondary expiry preference", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const a = makeEntry(
+        "weekly-sooner-primary-hot",
+        { request_count: 0 },
         {
           rate_limit: {
             allowed: true,
             limit_reached: false,
-            used_percent: 20,
-            reset_at: Math.floor((now + 4 * 3600_000) / 1000),
+            used_percent: 92,
+            reset_at: nowSec + 2 * 3600,
             limit_window_seconds: 18_000,
           },
           secondary_rate_limit: {
             limit_reached: false,
             used_percent: 40,
-            reset_at: Math.floor((now + 1 * 86400_000) / 1000),
+            remaining_percent: 60,
+            reset_at: nowSec + 6 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const b = makeEntry(
+        "weekly-later-primary-cool",
+        { request_count: 20 },
+        {
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            used_percent: 20,
+            reset_at: nowSec + 4 * 3600,
+            limit_window_seconds: 18_000,
+          },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 2 * 86400,
             limit_window_seconds: 604_800,
           },
         },
       );
 
-      expect(strategy.select([a, b], state).id).toBe("weekly-sooner");
+      expect(strategy.select([a, b], state).id).toBe("weekly-later-primary-cool");
+    });
+
+    it("falls through to request_count for secondary resets in the same expiry bucket", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const a = makeEntry(
+        "less-used",
+        { request_count: 2 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 6 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const b = makeEntry(
+        "more-used-but-earlier",
+        { request_count: 8 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 3 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+
+      expect(strategy.select([a, b], state).id).toBe("less-used");
+    });
+
+    it("does not force nearly depleted secondary quota ahead of healthier accounts", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const a = makeEntry(
+        "nearly-depleted-weekly",
+        { request_count: 8 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 92,
+            remaining_percent: 8,
+            reset_at: nowSec + 6 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const b = makeEntry(
+        "healthier-weekly",
+        { request_count: 2 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 7 * 86400,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+
+      expect(strategy.select([a, b], state).id).toBe("healthier-weekly");
     });
 
     it("does not penalize new accounts without window_reset_at — falls through to request_count", () => {
@@ -124,17 +214,50 @@ describe("rotation-strategy", () => {
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
-    it("breaks reset ties by request_count (fewer wins)", () => {
-      const reset = Date.now() + 86400_000;
-      const a = makeEntry("a", { request_count: 5, window_reset_at: reset });
-      const b = makeEntry("b", { request_count: 2, window_reset_at: reset });
+    it("breaks quota bucket ties by request_count (fewer wins)", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const a = makeEntry(
+        "a",
+        { request_count: 5 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 6 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
+      const b = makeEntry(
+        "b",
+        { request_count: 2 },
+        {
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 40,
+            remaining_percent: 60,
+            reset_at: nowSec + 8 * 3600,
+            limit_window_seconds: 604_800,
+          },
+        },
+      );
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
-    it("breaks further ties by last_used (LRU)", () => {
-      const reset = Date.now() + 86400_000;
-      const a = makeEntry("a", { request_count: 3, window_reset_at: reset, last_used: "2026-01-02T00:00:00Z" });
-      const b = makeEntry("b", { request_count: 3, window_reset_at: reset, last_used: "2026-01-01T00:00:00Z" });
+    it("breaks further quota bucket ties by last_used (LRU)", () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const quota = {
+        secondary_rate_limit: {
+          limit_reached: false,
+          used_percent: 40,
+          remaining_percent: 60,
+          reset_at: nowSec + 6 * 3600,
+          limit_window_seconds: 604_800,
+        },
+      };
+      const a = makeEntry("a", { request_count: 3, last_used: "2026-01-02T00:00:00Z" }, quota);
+      const b = makeEntry("b", { request_count: 3, last_used: "2026-01-01T00:00:00Z" }, quota);
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
@@ -182,18 +305,18 @@ describe("rotation-strategy", () => {
       expect(strategy.select([exhausted, healthy], state).id).toBe("healthy");
     });
 
-    it("sorts exhausted accounts among themselves by reset time", () => {
+    it("spreads exhausted accounts by normal least-used ordering", () => {
       const a = makeEntry(
         "a",
-        { window_reset_at: Date.now() + 3 * 86400_000 },
+        { request_count: 1, window_reset_at: Date.now() + 3 * 86400_000 },
         { rate_limit: { allowed: true, limit_reached: true, used_percent: 100, reset_at: null, limit_window_seconds: null } },
       );
       const b = makeEntry(
         "b",
-        { window_reset_at: Date.now() + 1 * 86400_000 },
+        { request_count: 8, window_reset_at: Date.now() + 1 * 86400_000 },
         { rate_limit: { allowed: true, limit_reached: true, used_percent: 100, reset_at: null, limit_window_seconds: null } },
       );
-      expect(strategy.select([a, b], state).id).toBe("b");
+      expect(strategy.select([a, b], state).id).toBe("a");
     });
 
     it("disperses across tied candidates on cold start (thundering herd)", () => {

@@ -26,8 +26,8 @@ const leastUsed: RotationStrategy = {
       const aExhausted = hasAnyReachedCachedQuota(a) ? 1 : 0;
       const bExhausted = hasAnyReachedCachedQuota(b) ? 1 : 0;
       if (aExhausted !== bExhausted) return aExhausted - bExhausted;
-      // Secondary: prefer accounts whose quota windows reset soonest. Longer-lived
-      // windows are compared first so weekly quota is used before it refreshes.
+      // Secondary: protect short primary windows, then prefer weekly quota by
+      // coarse expiry buckets so use-before-refresh does not concentrate load.
       const quotaWindowDiff = compareQuotaWindowPriority(a, b);
       if (quotaWindowDiff !== 0) return quotaWindowDiff;
       // Tertiary: fewer requests = more remaining quota
