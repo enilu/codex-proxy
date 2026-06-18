@@ -15,7 +15,7 @@ type RiskFilter = "all" | "recommended" | "low" | "limited" | "stale" | "unknown
 type SortMode = "risk" | "remaining" | "reset" | "updated" | "plan";
 
 const tableGrid =
-  "grid-cols-[minmax(250px,1.2fr)_110px_minmax(160px,0.8fr)_minmax(200px,0.9fr)_minmax(190px,0.85fr)_minmax(118px,0.5fr)_98px]";
+  "grid-cols-[minmax(170px,0.95fr)_88px_minmax(140px,0.72fr)_minmax(170px,0.86fr)_minmax(180px,0.88fr)_76px_74px]";
 
 const riskRank: Record<WeeklyLimitAccountRisk, number> = {
   limited: 0,
@@ -95,6 +95,16 @@ function formatDateTime(value: string | null | undefined, lang: string): string 
   });
 }
 
+function formatShortDate(value: number | null | undefined, lang: string): string {
+  if (!value) return "-";
+  const d = new Date(value * 1000);
+  if (!Number.isFinite(d.getTime())) return "-";
+  return d.toLocaleDateString(lang === "zh" ? "zh-CN" : undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function formatRelativeReset(resetAt: number | null | undefined, lang: string): { relative: string; absolute: string } {
   if (!resetAt) return { relative: "-", absolute: "-" };
   const deltaMs = resetAt * 1000 - Date.now();
@@ -110,15 +120,15 @@ function formatRelativeReset(resetAt: number | null | undefined, lang: string): 
   const minutes = totalMinutes % 60;
   let relative: string;
   if (days > 0) {
-    relative = lang === "zh" ? `${days}天${hours}小时后` : `${days}d ${hours}h`;
+    relative = lang === "zh" ? `${days}天后` : `${days}d`;
   } else if (hours > 0) {
-    relative = lang === "zh" ? `${hours}小时${minutes}分后` : `${hours}h ${minutes}m`;
+    relative = lang === "zh" ? `${hours}小时后` : `${hours}h`;
   } else {
     relative = lang === "zh" ? `${minutes}分钟后` : `${minutes}m`;
   }
   return {
     relative,
-    absolute: formatResetTime(resetAt, lang === "zh"),
+    absolute: days > 0 ? formatShortDate(resetAt, lang) : formatResetTime(resetAt, lang === "zh"),
   };
 }
 
@@ -269,7 +279,7 @@ export function WeeklyLimitsPage({ embedded }: { embedded?: boolean } = {}) {
           type="text"
           value={search}
           onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
-          placeholder={localText(lang, "搜索邮箱、计划、状态、代理、模型...", "Search email, plan, status, proxy, model...")}
+          placeholder={localText(lang, "搜索邮箱、计划、状态、模型...", "Search email, plan, status, model...")}
           class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-border-dark rounded-lg bg-white dark:bg-card-dark text-slate-700 dark:text-text-main focus:outline-none focus:ring-1 focus:ring-primary"
         />
         <div class="flex flex-wrap gap-1.5">
@@ -327,8 +337,8 @@ export function WeeklyLimitsPage({ embedded }: { embedded?: boolean } = {}) {
 
       <div class="bg-white dark:bg-card-dark border border-gray-200 dark:border-border-dark rounded-lg overflow-hidden shadow-sm">
         <div class="overflow-x-auto">
-          <div class="min-w-[1210px]">
-            <div class={`grid ${tableGrid} gap-3 px-4 py-2.5 border-b border-gray-100 dark:border-border-dark bg-slate-50 dark:bg-bg-dark text-xs text-slate-500 dark:text-text-dim font-semibold`}>
+          <div class="min-w-[930px]">
+            <div class={`grid ${tableGrid} gap-2.5 px-3 py-2.5 border-b border-gray-100 dark:border-border-dark bg-slate-50 dark:bg-bg-dark text-xs text-slate-500 dark:text-text-dim font-semibold`}>
               <span>{t("weeklyLimitsAccount")}</span>
               <span>{t("weeklyLimitsState")}</span>
               <span>{localText(lang, "当前窗口", "Current window")}</span>
@@ -403,13 +413,13 @@ function AccountQuotaRow({
     ? formatWindowDuration(row.currentWindow.limitWindowSeconds, lang === "zh")
     : localText(lang, "当前窗口", "Current");
   return (
-    <div class={`grid ${tableGrid} gap-3 px-4 py-3 border-b border-gray-50 dark:border-border-dark/50 text-sm items-center ${
+    <div class={`grid ${tableGrid} gap-2.5 px-3 py-2.5 border-b border-gray-50 dark:border-border-dark/50 text-sm items-center ${
       row.risk === "limited" || row.risk === "low" ? "bg-amber-50/45 dark:bg-warning-container/10" : ""
     }`}>
       <div class="min-w-0">
         <div class="flex items-center gap-2 min-w-0">
           <div class="font-semibold text-slate-700 dark:text-text-main truncate" title={accountName(row)}>
-            {accountName(row)}
+            {row.email}
           </div>
           {(row.staleQuota || row.quotaVerifyRequired) && (
             <Badge className="bg-warning-container text-warning border-warning/30">{localText(lang, "旧", "stale")}</Badge>
@@ -417,8 +427,6 @@ function AccountQuotaRow({
         </div>
         <div class="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-400 dark:text-text-dim">
           <span>{row.quotaPlanType || row.planType || localText(lang, "免费", "Free")}</span>
-          {row.proxyName && <span>{row.proxyName}</span>}
-          <span>{localText(lang, "上次", "Updated")} {formatDateTime(row.quotaFetchedAt, lang)}</span>
         </div>
       </div>
 
@@ -448,18 +456,18 @@ function AccountQuotaRow({
         <div>{reset.absolute}</div>
       </div>
 
-      <div class="flex justify-end gap-1.5">
+      <div class="flex justify-end gap-1">
         <button
           onClick={onRefresh}
           disabled={refreshing}
-          class="w-8 h-8 inline-grid place-items-center rounded-lg border border-primary/20 bg-primary-container/70 text-primary hover:bg-primary-container disabled:opacity-40 transition-colors"
+          class="w-7 h-7 inline-grid place-items-center rounded-lg border border-primary/20 bg-primary-container/70 text-primary hover:bg-primary-container disabled:opacity-40 transition-colors"
           title={localText(lang, "刷新额度", "Refresh quota")}
         >
           <RefreshIcon spin={refreshing} />
         </button>
         <button
           onClick={onToggle}
-          class="w-8 h-8 inline-grid place-items-center rounded-lg border border-gray-200 dark:border-border-dark text-slate-500 dark:text-text-dim hover:bg-slate-100 dark:hover:bg-border-dark transition-colors"
+          class="w-7 h-7 inline-grid place-items-center rounded-lg border border-gray-200 dark:border-border-dark text-slate-500 dark:text-text-dim hover:bg-slate-100 dark:hover:bg-border-dark transition-colors"
           title={localText(lang, "展开详情", "Toggle details")}
         >
           <ChevronIcon up={expanded} />

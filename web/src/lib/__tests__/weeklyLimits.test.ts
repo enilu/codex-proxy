@@ -221,7 +221,7 @@ describe("extractWeeklyLimits", () => {
     });
   });
 
-  it("builds one account row with current, weekly, model weekly, and latest 7 history points", () => {
+  it("builds one account row with current, weekly, model weekly, and latest 7 previous-window history points", () => {
     const quotaHistory = Array.from({ length: 8 }, (_, index) => ({
       key: `secondary:${index}`,
       fetchedAt: `2026-06-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
@@ -238,7 +238,7 @@ describe("extractWeeklyLimits", () => {
           limit_reached: false,
           used_percent: index * 10,
           remaining_percent: 100 - index * 10,
-          reset_at: 1000 + index,
+          reset_at: index < 7 ? 1000 + index : 2000,
           limit_window_seconds: week,
         },
         code_review_rate_limit: null,
@@ -281,7 +281,108 @@ describe("extractWeeklyLimits", () => {
       remainingPercent: 95,
     });
     expect(rows[0].weeklyHistory).toHaveLength(7);
-    expect(rows[0].weeklyHistory.map((point) => point.usedPercent)).toEqual([10, 20, 30, 40, 50, 60, 70]);
+    expect(rows[0].weeklyHistory.map((point) => point.usedPercent)).toEqual([0, 10, 20, 30, 40, 50, 60]);
+  });
+
+  it("excludes current weekly reset snapshots from history", () => {
+    const rows = extractWeeklyLimitAccounts([
+      account({
+        quota: {
+          plan_type: "prolite",
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            used_percent: 23,
+            remaining_percent: 77,
+            reset_at: 1781771459,
+            limit_window_seconds: 18000,
+          },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 19,
+            remaining_percent: 81,
+            reset_at: 1782340229,
+            limit_window_seconds: week,
+          },
+          code_review_rate_limit: null,
+        },
+        quotaFetchedAt: "2026-06-18T05:13:14.164Z",
+        quotaHistory: [
+          {
+            key: "secondary:29695767:604800",
+            fetchedAt: "2026-06-17T19:02:15.738Z",
+            quota: {
+              plan_type: "prolite",
+              rate_limit: {
+                allowed: true,
+                limit_reached: false,
+                used_percent: 0,
+                remaining_percent: 100,
+                reset_at: 1781748098,
+                limit_window_seconds: 18000,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 92,
+                remaining_percent: 8,
+                reset_at: 1781746049,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+          {
+            key: "additional:codex_bengalfox:secondary:29705892:604800|secondary:29705670:604800",
+            fetchedAt: "2026-06-18T02:12:05.388Z",
+            quota: {
+              plan_type: "prolite",
+              rate_limit: {
+                allowed: true,
+                limit_reached: false,
+                used_percent: 59,
+                remaining_percent: 41,
+                reset_at: 1781753430,
+                limit_window_seconds: 18000,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 9,
+                remaining_percent: 91,
+                reset_at: 1782340230,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+          {
+            key: "secondary:29705670:604800",
+            fetchedAt: "2026-06-18T05:13:14.164Z",
+            quota: {
+              plan_type: "prolite",
+              rate_limit: {
+                allowed: true,
+                limit_reached: false,
+                used_percent: 23,
+                remaining_percent: 77,
+                reset_at: 1781771459,
+                limit_window_seconds: 18000,
+              },
+              secondary_rate_limit: {
+                limit_reached: false,
+                used_percent: 19,
+                remaining_percent: 81,
+                reset_at: 1782340229,
+                limit_window_seconds: week,
+              },
+              code_review_rate_limit: null,
+            },
+          },
+        ],
+      }),
+    ]);
+
+    expect(rows[0].weeklyWindow?.usedPercent).toBe(19);
+    expect(rows[0].weeklyHistory.map((point) => point.usedPercent)).toEqual([92]);
   });
 
   it("marks accounts with allowed=false current windows as limited even when weekly quota remains", () => {

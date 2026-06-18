@@ -126,7 +126,7 @@ function accountDisplayPlan(account: Account, quota?: AccountQuota): string | un
   return quota?.plan_type || account.planType;
 }
 
-function collectSnapshots(account: Account): QuotaSnapshotCandidate[] {
+function collectSnapshots(account: Account, includeCurrent = true): QuotaSnapshotCandidate[] {
   const snapshots: QuotaSnapshotCandidate[] = [];
   for (const snapshot of account.quotaHistory ?? []) {
     snapshots.push({
@@ -135,7 +135,7 @@ function collectSnapshots(account: Account): QuotaSnapshotCandidate[] {
       key: snapshot.key,
     });
   }
-  if (account.quota) {
+  if (includeCurrent && account.quota) {
     snapshots.push({
       quota: account.quota,
       fetchedAt: account.quotaFetchedAt ?? null,
@@ -238,9 +238,9 @@ function dedupeWeeklyRows(rows: WeeklyLimitRow[]): WeeklyLimitRow[] {
   return deduped;
 }
 
-function rowsForAccount(account: Account, dedupe = true): WeeklyLimitRow[] {
+function rowsForAccount(account: Account, dedupe = true, includeCurrent = true): WeeklyLimitRow[] {
   const rows: WeeklyLimitRow[] = [];
-  for (const snapshot of collectSnapshots(account)) {
+  for (const snapshot of collectSnapshots(account, includeCurrent)) {
     const seen = new Set<string>();
     for (const candidate of quotaCandidates(snapshot.quota)) {
       if (!isWeeklyWindow(candidate.window) || seen.has(candidate.id)) continue;
@@ -262,9 +262,12 @@ function latestRowsByLimit(rows: WeeklyLimitRow[]): WeeklyLimitRow[] {
   return Array.from(latest.values());
 }
 
-function weeklyHistory(rows: WeeklyLimitRow[]): WeeklyLimitHistoryPoint[] {
+function weeklyHistory(rows: WeeklyLimitRow[], currentResetAt: number | null | undefined): WeeklyLimitHistoryPoint[] {
   const points = rows
-    .filter((row) => row.limitId === "secondary")
+    .filter((row) =>
+      row.limitId === "secondary" &&
+      (currentResetAt == null || !sameWeeklyReset(row.resetAt, currentResetAt))
+    )
     .sort((a, b) => snapshotSortMs(a) - snapshotSortMs(b))
     .map((row) => ({
       key: row.snapshotKey,
@@ -355,7 +358,7 @@ export function extractWeeklyLimitAccounts(accounts: Account[]): WeeklyLimitAcco
       currentWindow: windowSummary(latestSnapshot?.quota.rate_limit, latestSnapshot?.quota.rate_limit?.allowed),
       weeklyWindow,
       modelWeeklyLimits,
-      weeklyHistory: weeklyHistory(allWeeklyRows),
+      weeklyHistory: weeklyHistory(rowsForAccount(account, false, false), weeklyWindow?.resetAt),
     };
     return {
       ...base,
