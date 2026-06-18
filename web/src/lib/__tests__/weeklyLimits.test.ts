@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Account } from "../../../../shared/types";
-import { extractWeeklyLimits } from "../weeklyLimits";
+import { extractWeeklyLimitAccounts, extractWeeklyLimits } from "../weeklyLimits";
 
 const week = 7 * 24 * 60 * 60;
 
@@ -219,5 +219,98 @@ describe("extractWeeklyLimits", () => {
       remainingPercent: 32,
       resetAt: 1001,
     });
+  });
+
+  it("builds one account row with current, weekly, model weekly, and latest 7 history points", () => {
+    const quotaHistory = Array.from({ length: 8 }, (_, index) => ({
+      key: `secondary:${index}`,
+      fetchedAt: `2026-06-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+      quota: {
+        plan_type: "pro",
+        rate_limit: {
+          limit_reached: false,
+          used_percent: 1,
+          remaining_percent: 99,
+          reset_at: 500 + index,
+          limit_window_seconds: 300,
+        },
+        secondary_rate_limit: {
+          limit_reached: false,
+          used_percent: index * 10,
+          remaining_percent: 100 - index * 10,
+          reset_at: 1000 + index,
+          limit_window_seconds: week,
+        },
+        code_review_rate_limit: null,
+        rate_limits_by_limit_id: {
+          codex_bengalfox: {
+            limit_id: "codex_bengalfox",
+            limit_name: "GPT-5.3-Codex-Spark",
+            allowed: true,
+            limit_reached: false,
+            used_percent: 0,
+            remaining_percent: 100,
+            reset_at: 2000 + index,
+            limit_window_seconds: 300,
+            secondary_rate_limit: {
+              limit_reached: false,
+              used_percent: 5,
+              remaining_percent: 95,
+              reset_at: 3000 + index,
+              limit_window_seconds: week,
+            },
+          },
+        },
+      },
+    }));
+
+    const rows = extractWeeklyLimitAccounts([
+      account({
+        quotaHistory,
+        quota: quotaHistory[7].quota,
+        quotaFetchedAt: "2026-06-09T00:00:00.000Z",
+      }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].currentWindow?.remainingPercent).toBe(99);
+    expect(rows[0].weeklyWindow?.remainingPercent).toBe(30);
+    expect(rows[0].modelWeeklyLimits).toHaveLength(1);
+    expect(rows[0].modelWeeklyLimits[0]).toMatchObject({
+      limitName: "GPT-5.3-Codex-Spark weekly",
+      remainingPercent: 95,
+    });
+    expect(rows[0].weeklyHistory).toHaveLength(7);
+    expect(rows[0].weeklyHistory.map((point) => point.usedPercent)).toEqual([10, 20, 30, 40, 50, 60, 70]);
+  });
+
+  it("marks accounts with allowed=false current windows as limited even when weekly quota remains", () => {
+    const rows = extractWeeklyLimitAccounts([
+      account({
+        quota: {
+          plan_type: "plus",
+          rate_limit: {
+            allowed: false,
+            limit_reached: false,
+            used_percent: 0,
+            remaining_percent: 0,
+            reset_at: 500,
+            limit_window_seconds: 300,
+          },
+          secondary_rate_limit: {
+            limit_reached: false,
+            used_percent: 54,
+            remaining_percent: 46,
+            reset_at: 1000,
+            limit_window_seconds: week,
+          },
+          code_review_rate_limit: null,
+        },
+      }),
+    ]);
+
+    expect(rows[0].risk).toBe("limited");
+    expect(rows[0].currentWindow?.allowed).toBe(false);
+    expect(rows[0].weeklyWindow?.remainingPercent).toBe(46);
   });
 });

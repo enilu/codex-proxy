@@ -4,6 +4,7 @@ export interface AccountQuotaWindow {
   limit_reached?: boolean;
   reset_at?: number | null;
   limit_window_seconds?: number | null;
+  allowed?: boolean;
 }
 
 export interface AccountQuotaCredits {
@@ -70,6 +71,7 @@ export interface Account {
   };
   quota?: AccountQuota;
   quotaFetchedAt?: string | null;
+  quotaVerifyRequired?: boolean;
   quotaHistory?: AccountQuotaSnapshot[];
   proxyId?: string;
   proxyName?: string;
