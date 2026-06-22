@@ -117,6 +117,21 @@ describe("per-account concurrent request slots", () => {
       expect(pool.acquire({})).toBeNull();
     });
 
+    it("spreads in-flight acquires across idle accounts before adding redundant slots", () => {
+      const { pool } = createPool(3);
+
+      const firstWave = Array.from({ length: 3 }, () => pool.acquire({})!);
+      expect(new Set(firstWave.map((acquired) => acquired.entryId)).size).toBe(3);
+
+      const secondWave = Array.from({ length: 3 }, () => pool.acquire({})!);
+      const allCounts = new Map<string, number>();
+      for (const acquired of [...firstWave, ...secondWave]) {
+        allCounts.set(acquired.entryId, (allCounts.get(acquired.entryId) ?? 0) + 1);
+      }
+
+      expect([...allCounts.values()].sort()).toEqual([2, 2, 2]);
+    });
+
     it("reports slot capacity and in-flight usage", () => {
       const { pool } = createPool(2);
       expect(pool.getCapacitySummary()).toEqual({

@@ -55,6 +55,14 @@ export class AccountLifecycle {
     if (slots.length === 0) this.acquireLocks.delete(entryId);
   }
 
+  private leastLoaded(candidates: AccountEntry[]): AccountEntry[] {
+    let minSlots = Infinity;
+    for (const candidate of candidates) {
+      minSlots = Math.min(minSlots, this.slotCount(candidate.id));
+    }
+    return candidates.filter((candidate) => this.slotCount(candidate.id) === minSlots);
+  }
+
   private cleanupStaleSlots(nowMs: number): void {
     // Auto-release stale slots (slots are chronological — if oldest is fresh, all are)
     for (const [id, slots] of this.acquireLocks) {
@@ -133,13 +141,15 @@ export class AccountLifecycle {
       }
     }
 
+    const leastLoadedCandidates = this.leastLoaded(candidates);
+
     // Session affinity: prefer the account that owns the conversation
     let selected: AccountEntry;
     if (options?.preferredEntryId) {
       const preferred = candidates.find((a) => a.id === options.preferredEntryId);
-      selected = preferred ?? this.strategy.select(candidates, this.rotationState);
+      selected = preferred ?? this.strategy.select(leastLoadedCandidates, this.rotationState);
     } else {
-      selected = this.strategy.select(candidates, this.rotationState);
+      selected = this.strategy.select(leastLoadedCandidates, this.rotationState);
     }
     const prevSlots = this.acquireLocks.get(selected.id);
     const prevSlotMs = prevSlots?.[prevSlots.length - 1] ?? null;
